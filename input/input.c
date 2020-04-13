@@ -56,6 +56,8 @@ pid_t fake_ev_generator_pid = -1;
     #include "input-sony-prstux.h"
 #elif defined CERVANTES
     #include "input-cervantes.h"
+#elif defined BOOKEEN
+    #include "input-bookeen.h"
 #endif
 
 static inline int findFreeFdSlot() {
@@ -74,8 +76,8 @@ static int openInputDevice(lua_State *L) {
 
 #ifdef POCKETBOOK
     int inkview_events = luaL_checkint(L, 2);
-    if (inkview_events == 1) { 
-        startInkViewMain(L, fd, inputdevice); 
+    if (inkview_events == 1) {
+        startInkViewMain(L, fd, inputdevice);
         return 0;
     }
 #endif

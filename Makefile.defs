@@ -167,8 +167,14 @@ else ifeq ($(TARGET), cervantes)
 	endif
 	export USE_LJ_WPACLIENT=1
 else ifeq ($(TARGET), bookeen)
-	CHOST?=arm-linux-gnueabi
+	CHOST?=arm-pocketbook-linux-gnueabi
 	export BOOKEEN=1
+	HAS_POCKETBOOK_TC:=$(shell command -v arm-pocketbook-linux-gnueabi-gcc 2> /dev/null)
+	ifdef HAS_POCKETBOOK_TC
+		CHOST?=arm-pocketbook-linux-gnueabi
+	else
+		CHOST?=arm-linux-gnueabi
+	endif
 else ifndef TARGET
 	# if TARGET is not defined we will build an emulator on current machine
 	export EMULATE_READER=1
@@ -431,11 +437,17 @@ else ifeq ($(TARGET), cervantes)
 		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 	endif
 else ifeq ($(TARGET), bookeen)
+	# NOTE: The TC itself is built in ARM mode (otherwise glibc 2.9 fails to build).
+	#       We prefer Thumb mode for our own binaries, though, much like on every other i.MX device ;).
 	ARM_ARCH:=$(ARMV7_A8_ARCH)
-	ARM_ARCH+=-mfloat-abi=hard
+	ARM_ARCH+=-mfloat-abi=softfp
+	# NOTE: Because of course everything is terrible, newer FW (5.19+) use GCC 6.3.0's libstdc++,
+	#       so, ideally, we shouldn't be using this on those newer devices...
+	COMPAT_CFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
+	COMPAT_CXXFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
 	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
-		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
-		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+		COMPAT_CFLAGS+=$(UBUNTU_COMPAT_CFLAGS)
+		COMPAT_CXXFLAGS+=$(UBUNTU_COMPAT_CFLAGS)
 	endif
 else ifeq ($(TARGET), arm-generic)
 	# Defaults to generic crap

@@ -37,8 +37,8 @@ all: $(OUTPUT_DIR)/libs $(if $(ANDROID),,$(LUAJIT)) \
 		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(REMARKABLE)),$(OUTPUT_DIR)/fbink,) \
 		$(if $(REMARKABLE),$(OUTPUT_DIR)/button-listen,) \
 		$(SQLITE_LIB) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(CURL_LIB),) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(OUTPUT_DIR)/zsync2,) \
+		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX),$(BOOKEEN)),$(CURL_LIB),) \
+		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX),$(BOOKEEN)),$(OUTPUT_DIR)/zsync2,) \
 		$(LUA_LJ_SQLITE) $(OUTPUT_DIR)/common/xsys.lua
 ifeq ($(DO_STRIP),1)
 	STRIP_FILES="\
@@ -50,7 +50,7 @@ ifeq ($(DO_STRIP),1)
 		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(REMARKABLE)),$(OUTPUT_DIR)/fbink,) \
 		$(if $(REMARKABLE),$(OUTPUT_DIR)/button-listen,) \
 		$(if $(or $(KOBO),$(REMARKABLE)),$(OUTPUT_DIR)/fbdepth,) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(OUTPUT_DIR)/zsync2,) \
+		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX),$(BOOKEEN)),$(OUTPUT_DIR)/zsync2,) \
 		$(if $(ANDROID),,$(LUAJIT)) \
 		$(OUTPUT_DIR)/plugins/evernote.koplugin/lib/$(if $(WIN32),*.dll,*.so*) \
 		$(OUTPUT_DIR)/rocks/lib/lua/5.1/$(if $(WIN32),*.dll,*.so*) \
@@ -93,7 +93,7 @@ $(OUTPUT_DIR)/data:
 
 libs: \
 	$(if $(or $(SDL),$(ANDROID)),,$(OUTPUT_DIR)/libs/libkoreader-input.so) \
-	$(if $(or $(SDL),$(ANDROID),$(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(OUTPUT_DIR)/libs/libblitbuffer.so,) \
+	$(if $(or $(SDL),$(ANDROID),$(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX),$(BOOKEEN)),$(OUTPUT_DIR)/libs/libblitbuffer.so,) \
 	$(if $(APPIMAGE),$(OUTPUT_DIR)/libs/libXss.so.1,) \
 	$(OUTPUT_DIR)/libs/libkoreader-lfs.so \
 	$(OUTPUT_DIR)/libs/libkoreader-djvu.so \
@@ -104,7 +104,7 @@ libs: \
 $(OUTPUT_DIR)/libs/libkoreader-input.so: input/*.c input/*.h $(if $(KINDLE),$(POPEN_NOSHELL_LIB),)
 	@echo "Building koreader input module..."
 	$(CC) $(DYNLIB_CFLAGS) -I$(POPEN_NOSHELL_DIR) -I./input \
-		$(if $(CERVANTES),-DCERVANTES,) $(if $(KOBO),-DKOBO,) $(if $(KINDLE),-DKINDLE,) $(if $(POCKETBOOK),-DPOCKETBOOK,) $(if $(REMARKABLE),-DREMARKABLE,) $(if $(SONY_PRSTUX),-DSONY_PRSTUX,)\
+		$(if $(CERVANTES),-DCERVANTES,) $(if $(KOBO),-DKOBO,) $(if $(KINDLE),-DKINDLE,) $(if $(POCKETBOOK),-DPOCKETBOOK,) $(if $(REMARKABLE),-DREMARKABLE,) $(if $(SONY_PRSTUX),-DSONY_PRSTUX,) $(if $(BOOKEEN),-DBOOKEEN,)\
 		-o $@ \
 		input/input.c \
 		$(if $(KINDLE),$(POPEN_NOSHELL_LIB),) \
