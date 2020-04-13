@@ -30,6 +30,9 @@ local framebuffer = {
     marker = 0,
     -- used to avoid waiting twice on the same marker
     dont_wait_for_marker = nil,
+
+    -- Bookeen readers use a separate device for controlling the display
+    disp_fd = nil,
 }
 
 --[[ refresh list management: --]]
@@ -161,6 +164,12 @@ end
 local function cervantes_mxc_wait_for_update_complete(fb, marker)
     -- Wait for a specific update to be completed
     return C.ioctl(fb.fd, C.MXCFB_WAIT_FOR_UPDATE_COMPLETE, ffi.new("uint32_t[1]", marker))
+end
+
+
+local function bookeen_mxc_wait_for_update_complete(fb, marker)
+    return 0
+    -- TODO
 end
 
 -- Kindle's MXCFB_WAIT_FOR_UPDATE_COMPLETE == 0xc008462f
@@ -499,6 +508,29 @@ local function refresh_cervantes(fb, refreshtype, waveform_mode, x, y, w, h)
 end
 
 
+local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
+    if w <= 1 or h <= 1 then
+        fb.debug("discarding bogus refresh region, w:", w, "h:", h)
+        return
+    end
+    local refarea = ffi.new("struct mxcfb_update_data_bookeen[1]")
+    refarea[0].u0 = 0
+    refarea[0].u1 = self.disp_fd
+    refarea[0].u2 = waveform_mode or C.WAVEFORM_MODE_GC16
+    refarea[0].update_region.x_start = x;
+    refarea[0].update_region.x_end   = x + w;
+    refarea[0].update_region.y_start = y;
+    refarea[0].update_region.y_end   = y + h;
+
+    rv = C.ioctl(fb.disp_fd, C.BOOKEEN_SEND_UPDATE, refarea)
+    if rv < 0 then
+        local err = ffi.errno()
+        fb.debug("MXCFB_SEND_UPDATE ioctl failed:", ffi.string(C.strerror(err)))
+    end
+
+    return
+end
+
 --[[ framebuffer API ]]--
 
 function framebuffer:refreshPartialImp(x, y, w, h, dither)
@@ -749,6 +781,23 @@ function framebuffer:init()
         self.waveform_full = C.WAVEFORM_MODE_GC16
         self.waveform_partial = C.WAVEFORM_MODE_AUTO
         self.waveform_night = C.WAVEFORM_MODE_GC16
+        self.waveform_flashnight = self.waveform_night
+        self.night_is_reagl = false
+    elseif self.device:isBookeen() then
+        require("ffi/mxcfb_bookeen_h")
+
+        self.disp_fd = C.open("/dev/disp", C.O_RDWR)
+        assert(self.disp_fd ~= -1, "cannot open display!")
+
+        self.mech_refresh = refresh_bookeen
+        self.mech_wait_update_complete = bookeen_mxc_wait_for_update_complete
+
+        self.waveform_fast = C.EINK_DU_MODE
+        self.waveform_ui = C.EINK_DU_MODE
+        self.waveform_flashui = self.EINK_GC16_MODE
+        self.waveform_full = C.EINK_GC16_MODE
+        self.waveform_partial = C.EINK_LOCAL_MODE
+        self.waveform_night = C.EINK_GC16_MODE
         self.waveform_flashnight = self.waveform_night
         self.night_is_reagl = false
     else

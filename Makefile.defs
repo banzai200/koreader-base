@@ -166,6 +166,9 @@ else ifeq ($(TARGET), cervantes)
 		CHOST?=arm-linux-gnueabi
 	endif
 	export USE_LJ_WPACLIENT=1
+else ifeq ($(TARGET), bookeen)
+	CHOST?=arm-linux-gnueabi
+	export BOOKEEN=1
 else ifndef TARGET
 	# if TARGET is not defined we will build an emulator on current machine
 	export EMULATE_READER=1
@@ -423,6 +426,13 @@ else ifeq ($(TARGET), sony-prstux)
 else ifeq ($(TARGET), cervantes)
 	ARM_ARCH:=$(ARMV7_GENERIC_ARCH)
 	ARM_ARCH+=-mfloat-abi=softfp
+	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
+		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+	endif
+else ifeq ($(TARGET), bookeen)
+	ARM_ARCH:=$(ARMV7_A8_ARCH)
+	ARM_ARCH+=-mfloat-abi=hard
 	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
 		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
