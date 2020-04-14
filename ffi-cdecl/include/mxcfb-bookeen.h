@@ -52,5 +52,6 @@ struct mxcfb_update_data_bookeen {
 #define MXCFB_SEND_UPDATE 0x402
 #define MXCFB_SET_WAVEFORM_MODES 0x403
 #define MXCFB_SET_TEMPERATURE	0x404
+#define DISP_EINK_GET_UPDATE_STATUS	0x405
 
 #endif
