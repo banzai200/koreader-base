@@ -514,8 +514,8 @@ local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
         return
     end
     local set_mode = ffi.new("struct mxcfb_update_data_bookeen[1]")
-    refarea[0].u0 = 0
-    refarea[0].u1 = waveform_mode or C.EINK_GC16_MODE
+    set_mode[0].u0 = 0
+    set_mode[0].u1 = waveform_mode or C.EINK_GC16_MODE
 
     local refarea = ffi.new("struct mxcfb_update_data_bookeen[1]")
     refarea[0].u0 = 0
@@ -802,7 +802,7 @@ function framebuffer:init()
         self.mech_refresh = refresh_bookeen
         self.mech_wait_update_complete = bookeen_mxc_wait_for_update_complete
 
-        self.waveform_fast = C.EINK_LOCAL_MODE
+        self.waveform_fast = C.EINK_DU_MODE
         self.waveform_ui = bor(C.EINK_GC16_MODE, C.EINK_LOCAL_MODE)
         self.waveform_flashui = C.EINK_GC16_MODE
         self.waveform_full = C.EINK_GC16_MODE
