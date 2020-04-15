@@ -167,9 +167,14 @@ local function cervantes_mxc_wait_for_update_complete(fb, marker)
 end
 
 
-local function bookeen_mxc_wait_for_update_complete(fb, marker)
+local function bookeen_mxc_wait_for_update_complete(fb)
+    local upd = ffi.new("struct mxcfb_update_data_bookeen[1]")
+    upd[0].u0 = 0
+    -- This is what the built-in reader does...
+    while C.ioctl(fb.disp_fd, C.DISP_EINK_GET_UPDATE_STATUS, upd) ~= 0 do
+        C.usleep(10)
+    end
     return 0
-    -- TODO
 end
 
 -- Kindle's MXCFB_WAIT_FOR_UPDATE_COMPLETE == 0xc008462f
@@ -509,13 +514,14 @@ end
 
 
 local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
+    local bb = fb.full_bb or fb.bb
+    w, x = BB.checkBounds(w or bb:getWidth(), x or 0, 0, bb:getWidth(), 0xFFFF)
+    h, y = BB.checkBounds(h or bb:getHeight(), y or 0, 0, bb:getHeight(), 0xFFFF)
+    x, y, w, h = bb:getPhysicalRect(x, y, w, h)
+
     if w <= 1 or h <= 1 then
-        fb.debug("discarding bogus refresh region, w:", w, "h:", h)
         return
     end
-    local set_mode = ffi.new("struct mxcfb_update_data_bookeen[1]")
-    set_mode[0].u0 = 0
-    set_mode[0].u1 = waveform_mode or C.EINK_GC16_MODE
 
     local refarea = ffi.new("struct mxcfb_update_data_bookeen[1]")
     refarea[0].u0 = 0
@@ -526,16 +532,15 @@ local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
     refarea[0].update_region.y_start = y;
     refarea[0].update_region.y_end   = y + h;
 
-    rv = C.ioctl(fb.disp_fd, C.MXCFB_SET_WAVEFORM_MODES, set_mode)
-    if rv < 0 then
-        local err = ffi.errno()
-        fb.debug("MXCFB_SET_WAVEFORM_MODES ioctl failed:", ffi.string(C.strerror(err)))
-    end
-
     rv = C.ioctl(fb.disp_fd, C.MXCFB_SEND_UPDATE, refarea)
     if rv < 0 then
         local err = ffi.errno()
         fb.debug("MXCFB_SEND_UPDATE ioctl failed:", ffi.string(C.strerror(err)))
+        return
+    end
+
+    if refreshtype == C.UPDATE_MODE_FULL then
+        bookeen_mxc_wait_for_update_complete()
     end
 
     return

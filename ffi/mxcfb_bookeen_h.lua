@@ -34,6 +34,7 @@ struct mxcfb_update_data_bookeen {
 static const int MXCFB_SEND_UPDATE = 0x402;
 static const int MXCFB_SET_WAVEFORM_MODES = 0x403;
 static const int MXCFB_SET_TEMPERATURE = 0x404;
+static const int DISP_EINK_GET_UPDATE_STATUS = 0x405;
 
 ]]
 
