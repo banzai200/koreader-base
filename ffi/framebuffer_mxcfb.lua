@@ -540,7 +540,7 @@ local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
     end
 
     if refreshtype == C.UPDATE_MODE_FULL then
-        bookeen_mxc_wait_for_update_complete()
+        bookeen_mxc_wait_for_update_complete(fb)
     end
 
     return
