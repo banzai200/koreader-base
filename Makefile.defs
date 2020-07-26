@@ -175,6 +175,7 @@ else ifeq ($(TARGET), bookeen)
 	else
 		CHOST?=arm-linux-gnueabi
 	endif
+	export USE_LJ_WPACLIENT=1
 else ifndef TARGET
 	# if TARGET is not defined we will build an emulator on current machine
 	export EMULATE_READER=1
