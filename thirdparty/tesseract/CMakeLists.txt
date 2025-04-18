@@ -1,30 +1,31 @@
-project(tesseract)
-cmake_minimum_required(VERSION 3.5.1)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-ep_get_source_dir(SOURCE_DIR)
-
-if ("$ENV{ANDROID}" STREQUAL "1")
-    set(PATCH_CMD "${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/tesseract-android.patch")
-endif()
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/tesseract-ocr/tesseract.git
-    60176fc5ae5e7f6bdef60c926a4b5ea03de2bfa7
-    ${SOURCE_DIR}
+list(APPEND PATCH_FILES
+    k2pdfopt.patch
+    cmake_tweaks.patch
+    fix-old-tc-build.patch
+    no_debug_fonts.patch
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    PATCH_COMMAND COMMAND ${PATCH_CMD}
-    CONFIGURE_COMMAND ""
-    # skip build and install, libk2pdfopt will build it
-    BUILD_COMMAND ""
-    INSTALL_COMMAND ""
+list(APPEND CMAKE_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    # Project options.
+    -DANDROID=${ANDROID}
+    -DBUILD_TRAINING_TOOLS=FALSE
+    -DDISABLE_ARCHIVE=TRUE
+    -DDISABLE_CURL=TRUE
+    -DDISABLE_TIFF=TRUE
+    -DGRAPHICS_DISABLED=TRUE
+    -DINSTALL_CONFIGS=FALSE
+)
+
+list(APPEND BUILD_CMD COMMAND ninja)
+
+list(APPEND INSTALL_CMD COMMAND ${CMAKE_COMMAND} --install .)
+
+external_project(
+    DOWNLOAD URL 17a6d7b78793ff587686449b29d51894
+    https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.0.tar.gz
+    PATCH_FILES ${PATCH_FILES}
+    CMAKE_ARGS ${CMAKE_ARGS}
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

@@ -22,7 +22,10 @@
 #include <lualib.h>
 #include <lauxlib.h>
 
-int luaopen_djvu(lua_State *L);
+// Symbol visibility
+#define DLL_PUBLIC __attribute__((visibility("default")))
+#define DLL_LOCAL  __attribute__((visibility("hidden")))
 
-#define True 1
+DLL_PUBLIC int luaopen_djvu(lua_State *L);
+
 #endif

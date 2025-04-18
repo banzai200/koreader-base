@@ -1,4 +1,4 @@
---------------------------------------------------------------------------------
+--[[
 -- A library for interfacing with SQLite3 databases.
 --
 -- Copyright (C) 2011-2016 Stefano Peluchetti. All rights reserved.
@@ -7,7 +7,7 @@
 --
 -- This file is part of the LJSQLite3 library, which is released under the MIT
 -- license: full text in file LICENSE.TXT in the library's root folder.
---------------------------------------------------------------------------------
+--]]
 
 -- TODO: Refactor according to latest style / coding guidelines.
 
@@ -18,14 +18,46 @@
 -- TODO: Resultset (and so exec) could be optimized by avoiding loads/stores
 -- TODO: of row table via _step?
 
-local ffi  = require "ffi"
-local bit  = require "bit"
-local xsys = require "xsys"
+local ffi = require("ffi")
+local C = ffi.C
+require("ffi/posix_h")
+local bit = require("bit")
 
-local split, trim = xsys.string.split, xsys.string.trim
+-- CosminApreutesei's implementation from http://lua-users.org/wiki/SplitJoin
+function string.gsplit(s, sep, plain)
+  local start = 1
+  local done = false
+  local function pass(i, j, ...)
+    if i then
+      local seg = s:sub(start, i)  -- NOTE: Original code used i - 1 to skip the separator!
+      start = j + 1
+      return seg, ...
+    else
+      done = true
+      return s:sub(start)
+    end
+  end
+  return function()
+    if done then
+      return
+    end
+    if sep == '' then
+      done = true
+      return s
+    end
+    return pass(s:find(sep, start, plain))
+  end
+end
+
+-- c.f., http://lua-users.org/wiki/StringTrim
+local function trim(s)
+  local from = s:match"^%s*()"
+  return from > #s and "" or s:match(".*%S", from)
+end
 
 local function err(code, msg)
-  error("ljsqlite3["..code.."] "..msg)
+  -- Throw a traceback into the mix, because it's extremely unintuitive otherwise...
+  error("ljsqlite3[" .. code .. "] " .. msg .. "\n" .. debug.traceback())
 end
 
 -- Codes -----------------------------------------------------------------------
@@ -41,40 +73,41 @@ do
   local types = { "INTEGER", "FLOAT", "TEXT", "BLOB", "NULL" } -- From 1 to 5.
 
   local opens = {
-    READONLY =        0x00000001;
-    READWRITE =       0x00000002;
-    CREATE =          0x00000004;
-    DELETEONCLOSE =   0x00000008;
-    EXCLUSIVE =       0x00000010;
-    AUTOPROXY =       0x00000020;
-    URI =             0x00000040;
-    MAIN_DB =         0x00000100;
-    TEMP_DB =         0x00000200;
-    TRANSIENT_DB =    0x00000400;
-    MAIN_JOURNAL =    0x00000800;
-    TEMP_JOURNAL =    0x00001000;
-    SUBJOURNAL =      0x00002000;
-    MASTER_JOURNAL =  0x00004000;
-    NOMUTEX =         0x00008000;
-    FULLMUTEX =       0x00010000;
-    SHAREDCACHE =     0x00020000;
-    PRIVATECACHE =    0x00040000;
-    WAL =             0x00080000;
+    READONLY =        0x00000001,
+    READWRITE =       0x00000002,
+    CREATE =          0x00000004,
+    DELETEONCLOSE =   0x00000008,
+    EXCLUSIVE =       0x00000010,
+    AUTOPROXY =       0x00000020,
+    URI =             0x00000040,
+    MAIN_DB =         0x00000100,
+    TEMP_DB =         0x00000200,
+    TRANSIENT_DB =    0x00000400,
+    MAIN_JOURNAL =    0x00000800,
+    TEMP_JOURNAL =    0x00001000,
+    SUBJOURNAL =      0x00002000,
+    MASTER_JOURNAL =  0x00004000,
+    NOMUTEX =         0x00008000,
+    FULLMUTEX =       0x00010000,
+    SHAREDCACHE =     0x00020000,
+    PRIVATECACHE =    0x00040000,
+    WAL =             0x00080000,
   }
 
   local t = sqlconstants
   local pre = "static const int32_t SQLITE_"
-  for i=0,26    do t[#t+1] = pre..codes[i].."="..i..";\n" end
-  for i=100,101 do t[#t+1] = pre..codes[i].."="..i..";\n" end
-  for i=1,5     do t[#t+1] = pre..types[i].."="..i..";\n" end
+  for i=0,26    do t[#t+1] = pre..codes[i].." = "..i..";\n" end
+  for i=100,101 do t[#t+1] = pre..codes[i].." = "..i..";\n" end
+  for i=1,5     do t[#t+1] = pre..types[i].." = "..i..";\n" end
   pre = pre.."OPEN_"
-  for k,v in pairs(opens) do t[#t+1] = pre..k.."="..bit.tobit(v)..";\n" end
+  for k,v in pairs(opens) do t[#t+1] = pre..k.." = "..bit.tobit(v)..";\n" end
 end
 
 -- Cdef ------------------------------------------------------------------------
 -- SQLITE_*, OPEN_*
 
 ffi.cdef(table.concat(sqlconstants))
+sqlconstants = nil
 
 -- sqlite3*, ljsqlite3_*
 ffi.cdef[[
@@ -84,6 +117,7 @@ typedef struct sqlite3_stmt sqlite3_stmt;
 typedef void (*sqlite3_destructor_type)(void*);
 typedef struct sqlite3_context sqlite3_context;
 typedef struct Mem sqlite3_value;
+typedef int (*ljsqlite3_cbsql3exec)(void*, int total, char** data, char** cols);
 
 // Get informative error message.
 const char *sqlite3_errmsg(sqlite3*);
@@ -92,7 +126,11 @@ const char *sqlite3_errmsg(sqlite3*);
 int sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags,
   const char *zVfs);
 int sqlite3_close(sqlite3*);
+int sqlite3_close_v2(sqlite3*);
 int sqlite3_busy_timeout(sqlite3*, int ms);
+
+// exec
+int sqlite3_exec(sqlite3 *conn, const char *sql, ljsqlite3_cbsql3exec, void *, char **errmsg);
 
 // Statement.
 int sqlite3_prepare_v2(sqlite3 *conn, const char *zSql, int nByte,
@@ -161,16 +199,15 @@ int sqlite3_create_function(
 );
 ]]
 
---------------------------------------------------------------------------------
-local sql = ffi.load("sqlite3")
-
+-- --------------------------------------------------------------------------------
+local sql = ffi.loadlib("sqlite3", "0")
 local transient = ffi.cast("sqlite3_destructor_type", -1)
 local int64_ct = ffi.typeof("int64_t")
 
 local blob_mt = {} -- For tagging only.
 
-local function blob(str)
-  return setmetatable({ str }, blob_mt)
+local function blob(ptr, size)
+  return setmetatable({ ptr, size }, blob_mt)
 end
 
 local connstmt = {} -- Statements for a conn.
@@ -194,8 +231,8 @@ end
 
 -- Throw error for a given connection.
 local function E_conn(pconn, code)
-  local code, msg = codemsg(pconn, code)
-  err(code, msg)
+  local scode, msg = codemsg(pconn, code)
+  err(scode, msg)
 end
 
 -- Test code is OK or throw error for a given connection.
@@ -224,7 +261,7 @@ return function(stmt_or_value <opt_i>)
     return ffi.string(sql.sqlite3_<variant>_text(stmt_or_value <opt_i>), nb)
   elseif t == sql.SQLITE_BLOB then
     local nb = sql.sqlite3_<variant>_bytes(stmt_or_value <opt_i>)
-    return ffi.string(sql.sqlite3_<variant>_blob(stmt_or_value <opt_i>), nb)
+    return blob(sql.sqlite3_<variant>_blob(stmt_or_value <opt_i>), nb)
   elseif t == sql.SQLITE_NULL then
     return nil
   else
@@ -244,9 +281,10 @@ return function(stmt_or_value, v <opt_i>)
     return sql.sqlite3_<variant>_text(stmt_or_value <opt_i>, v, #v,
       transient)
   elseif t == "table" and getmetatable(v) == blob_mt then
-    v = v[1]
-    return sql.sqlite3_<variant>_blob(stmt_or_value <opt_i>, v, #v,
+    local sql_res = sql.sqlite3_<variant>_blob(stmt_or_value <opt_i>, v[1], v[2],
       transient)
+    free(v[1])
+    return sql_res
   elseif t == "nil" then
     return sql.sqlite3_<variant>_null(stmt_or_value <opt_i>)
   else
@@ -263,6 +301,8 @@ local sql_env = {
   int64_ct     = int64_ct,
   blob_mt      = blob_mt,
   getmetatable = getmetatable,
+  blob         = blob,
+  free         = C.free,
   err          = err,
   type         = type
 }
@@ -272,9 +312,7 @@ local function sql_format(s, variant, index)
 end
 
 local function loadcode(s, env)
-  local ret = assert(loadstring(s))
-  if env then setfenv(ret, env) end
-  return ret()
+  return assert(load(s, "LJSQLite3", "t", env))()
 end
 
 -- Must always be called from *:_* function due to error level 4.
@@ -304,9 +342,9 @@ local function open(str, mode)
   connstmt[conn] = setmetatable({}, { __mode = "k" })
   conncb[conn] = { scalar = {}, step = {}, final = {} }
   if code ~= sql.SQLITE_OK then
-    local code, msg = codemsg(conn._ptr, code) -- Before closing!
+    local scode, msg = codemsg(conn._ptr, code) -- Before closing!
     conn:close() -- Free resources, should not fail here in this case!
-    err(code, msg)
+    err(scode, msg)
   end
   return conn
 end
@@ -318,7 +356,7 @@ function conn_mt:close() T_open(self)
   for _,v in pairs(conncb[self].scalar) do v:free() end
   for _,v in pairs(conncb[self].step)   do v:free() end
   for _,v in pairs(conncb[self].final)  do v:free() end
-  local code = sql.sqlite3_close(self._ptr)
+  local code = sql.sqlite3_close_v2(self._ptr)
   T_okcode(self._ptr, code)
   connstmt[self] = nil -- Table connstmt is not weak, need to clear manually.
   conncb[self] = nil
@@ -341,10 +379,9 @@ end
 
 -- Connection exec, __call, rowexec --------------------------------------------
 function conn_mt:exec(commands, get) T_open(self)
-  local cmd1 = split(commands, ";")
   local res, n
-  for i=1,#cmd1 do
-    local cmd = trim(cmd1[i])
+  for command in commands:gsplit(";", true) do
+    local cmd = trim(command)
     if #cmd > 0 then
       local stmt = self:prepare(cmd)
       res, n = stmt:resultset(get)
@@ -368,11 +405,38 @@ function conn_mt:rowexec(command) T_open(self)
   end
 end
 
+function conn_mt:execsql(commands) T_open(self)
+  local r = {[0] = {}}
+  local fn = function(conn, total, data, cols)
+    for i = 0, total - 1 do
+      local val, col = ffi.string(data[i]), ffi.string(cols[i])
+      if not r[col] then
+        r[col] = {}
+        table.insert(r, r[col])
+        table.insert(r[0], col)
+      end
+      table.insert(r[col], val)
+    end
+
+    return 0
+  end
+  local cb = ffi.cast('ljsqlite3_cbsql3exec', fn)
+  sql.sqlite3_exec(self._ptr, commands, cb, nil, nil)
+  return r
+end
+
+-- We need that if we have multiple processes accessing the same SQLite db for writing
+-- (write locks are exclusive, so waiting & retrying is necessary).
+-- SQLite will retry getting a lock multiple times until at least timeout_ms of sleeping have accumulated.
+function conn_mt:set_busy_timeout(timeout_ms) T_open(self)
+  local code = sql.sqlite3_busy_timeout(self._ptr, timeout_ms)
+  T_okcode(self._ptr, code)
+end
+
 function conn_mt:__call(commands, out) T_open(self)
   out = out or print
-  local cmd1 = split(commands, ";")
-  for c=1,#cmd1 do
-    local cmd = trim(cmd1[c])
+  for command in commands:gsplit(";", true) do
+    local cmd = trim(command)
     if #cmd > 0 then
       local stmt = self:prepare(cmd)
       local ret, n = stmt:resultset()
@@ -575,6 +639,19 @@ function stmt_mt:resultset(get, maxrecords) T_open(self)
     for i=1,#h do out[h[i]] = o[i] end
   end
   return out, n
+end
+
+-- iterator over rows
+function stmt_mt:rows()
+  return function() T_open(self)
+    local row = self:step()
+    if row then
+      return row
+    else
+      self:clearbind():reset()
+      return nil
+    end
+  end
 end
 
 -- Statement bind --------------------------------------------------------------

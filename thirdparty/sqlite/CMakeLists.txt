@@ -1,45 +1,21 @@
-project(sqlite)
-cmake_minimum_required(VERSION 3.5.1)
+list(APPEND CMAKE_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    -DBUILD_SHARED_LIBS=$<NOT:$<BOOL:${MONOLIBTIC}>>
+)
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
+list(APPEND BUILD_CMD COMMAND ninja)
 
-enable_language(C)
+list(APPEND INSTALL_CMD COMMAND ${CMAKE_COMMAND} --install .)
 
-assert_var_defined(CC)
-assert_var_defined(CPPFLAGS)
-assert_var_defined(CFLAGS)
-assert_var_defined(LDFLAGS)
-assert_var_defined(CHOST)
+if(NOT MONOLIBTIC)
+    append_shared_lib_install_commands(INSTALL_CMD sqlite3 VERSION 0)
+endif()
 
-ep_get_binary_dir(BINARY_DIR)
-
-set(CFG_CMD sh -c "CC=\"${CC}\"")
-set(CFG_CMD "${CFG_CMD} CPPFLAGS=\"${CPPFLAGS} -DNDEBUG -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DECLTYPE -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_USE_ALLOCA\"")
-# Explicitly disable zlib, because it's only optionally used by the shell & extensions, and we disable both of those.
-# This should hopefully prevent Android from picking it up...
-set(CFG_CMD "${CFG_CMD} ac_cv_header_zlib_h=no")
-set(CFG_CMD "${CFG_CMD} CFLAGS=\"${CFLAGS} -fno-fast-math\"")
-set(CFG_CMD "${CFG_CMD} LDFLAGS=\"${LDFLAGS}\"")
-set(CFG_CMD "${CFG_CMD} ./configure")
-set(CFG_CMD "${CFG_CMD} --host=${CHOST} --prefix=${BINARY_DIR}")
-# set(CFG_CMD "${CFG_CMD} --enable-static")
-set(CFG_CMD "${CFG_CMD} --disable-static")
-set(CFG_CMD "${CFG_CMD} --enable-shared")
-set(CFG_CMD "${CFG_CMD} --enable-threadsafe")
-set(CFG_CMD "${CFG_CMD} --disable-dynamic-extensions")
-set(CFG_CMD "${CFG_CMD} --disable-editline")
-set(CFG_CMD "${CFG_CMD} --disable-readline")
-set(CFG_CMD "${CFG_CMD} --disable-static-shell")
-
-include(ExternalProject)
-set(SQLITE_VER "3310100")
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_DIR ${KO_DOWNLOAD_DIR}
-    URL https://www.sqlite.org/2020/sqlite-autoconf-${SQLITE_VER}.tar.gz
-    URL_HASH SHA1=0c30f5b22152a8166aa3bebb0f4bc1f3e9cc508b
-    BUILD_IN_SOURCE 1
-    CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j1
+external_project(
+    DOWNLOAD URL baf0e73e79cf43ffc37d7e1cfe489c08
+    https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+    PATCH_OVERLAY overlay
+    CMAKE_ARGS ${CMAKE_ARGS}
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

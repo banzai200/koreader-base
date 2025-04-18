@@ -16,21 +16,17 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <math.h>
-#include <string.h>
 #include <errno.h>
-#include <pthread.h>
-#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
+
 #include <libdjvu/miniexp.h>
 #include <libdjvu/ddjvuapi.h>
 
 #include "blitbuffer.h"
+#include "djvu.h"
 #include "drawcontext.h"
 #include "koptcontext.h"
-#include "k2pdfopt.h"
-#include "koptreflow.h"
-#include "koptcrop.h"
-#include "djvu.h"
 
 #define ABS(x) ((x<0)?(-x):(x))
 
@@ -41,9 +37,10 @@
 #define lua_setkeyval(L, type, key, val) do { \
 	lua_pushstring(L, key); \
 	lua_push##type(L, val); \
-	lua_settable(L, LUA_SETTABLE_STACK_TOP); \
+	lua_rawset(L, LUA_SETTABLE_STACK_TOP); \
 } while(0)
 
+#define True 1
 
 typedef struct DjvuDocument {
 	ddjvu_context_t *context;
@@ -58,28 +55,6 @@ typedef struct DjvuPage {
 	ddjvu_pageinfo_t info;
 	DjvuDocument *doc;
 } DjvuPage;
-
-
-typedef enum DjvuZoneId {
-	ZI_PAGE,
-	ZI_COLUMN,
-	ZI_REGION,
-	ZI_PARA,
-	ZI_LINE,
-	ZI_WORD,
-	ZI_CHAR,
-	N_ZI
-} DjvuZoneId;
-
-static const char *djvuZoneName[N_ZI] = {
-	"page",
-	"column",
-	"region",
-	"para",
-	"line",
-	"word",
-	"char"
-};
 
 typedef enum DjvuZoneSexpIdx {
 	SI_ZONE_NAME,
@@ -100,11 +75,33 @@ static const char *djvuZoneLuaKey[N_SI_ZONE] = {
 	NULL
 };
 
-
 int int_from_miniexp_nth(int n, miniexp_t sexp) {
 	miniexp_t s = miniexp_nth(n, sexp);
 	return (miniexp_numberp(s) ? miniexp_to_int(s) : ((int)0));
 }
+
+#ifdef DEBUG
+
+static const char *render_mode_str(ddjvu_render_mode_t mode) {
+    switch (mode) {
+    case DDJVU_RENDER_COLOR:
+        return "color";
+    case DDJVU_RENDER_BLACK:
+        return "black";
+    case DDJVU_RENDER_COLORONLY:
+        return "coloronly";
+    case DDJVU_RENDER_MASKONLY:
+        return "maskonly";
+    case DDJVU_RENDER_BACKGROUND:
+        return "background";
+    case DDJVU_RENDER_FOREGROUND:
+        return "foreground";
+    default:
+        return "???";
+    }
+}
+
+#endif
 
 static int handle(lua_State *L, ddjvu_context_t *ctx, int wait)
 {
@@ -112,7 +109,7 @@ static int handle(lua_State *L, ddjvu_context_t *ctx, int wait)
 	if (!ctx)
 		return -1;
 	if (wait)
-		msg = ddjvu_message_wait(ctx);
+		ddjvu_message_wait(ctx);
 	while ((msg = ddjvu_message_peek(ctx)))
 	{
 	  switch(msg->m_any.tag)
@@ -202,6 +199,9 @@ static int closeDocument(lua_State *L) {
 static int setColorRendering(lua_State *L) {
 	DjvuDocument *doc = (DjvuDocument*) luaL_checkudata(L, 1, "djvudocument");
 	int color = lua_toboolean(L, 2);
+#ifdef DEBUG
+	printf("%s: %s\n", __func__, color ? "color" : "grey");
+#endif
 	if (doc->pixelformat != NULL) {
 		ddjvu_format_release(doc->pixelformat);
 		doc->pixelformat = NULL;
@@ -237,7 +237,7 @@ static int getMetadata(lua_State *L) {
 		if (value) {
 			lua_pushstring(L, miniexp_to_name(keys[i]));
 			lua_pushstring(L, value);
-			lua_settable(L, -3);
+			lua_rawset(L, -3);
 		}
 	}
 
@@ -251,73 +251,66 @@ static int getNumberOfPages(lua_State *L) {
 	return 1;
 }
 
-static int walkTableOfContent(lua_State *L, miniexp_t r, int *count, int depth) {
+static void walkTableOfContent(lua_State *L, miniexp_t r, int *count, int depth) {
 	depth++;
 
-	miniexp_t lista = miniexp_cdr(r); // go inside bookmars in the list
+	miniexp_t lista = miniexp_cdr(r); // go inside bookmarks in the list
 
-	int length = miniexp_length(r);
+	int length = miniexp_length(r) - 1; // Minus the sentinel NUL
 	int counter = 0;
-	const char* page_name;
-	int page_number;
-	uint32_t page_name_num_idx;
-
-	while(counter < length-1) {
-		lua_pushnumber(L, *count);
-		lua_newtable(L);
+	while (counter < length) {
+		lua_createtable(L, 0, 3);
 
 		lua_pushstring(L, "page");
-		page_name = miniexp_to_str(miniexp_car(miniexp_cdr(miniexp_nth(counter, lista))));
-		if(page_name != NULL && page_name[0] == '#') {
+		const char* page_name = miniexp_to_str(miniexp_car(miniexp_cdr(miniexp_nth(counter, lista))));
+		if (page_name != NULL && page_name[0] == '#') {
 			errno = 0;
-			page_name_num_idx = 1;  /* skip leading # */
+			uint32_t page_name_num_idx = 1U;  /* skip leading # */
 			while (page_name[page_name_num_idx] && !isdigit(page_name[page_name_num_idx])) {
 				page_name_num_idx++;
 			}
-			page_number = strtol(page_name+page_name_num_idx, NULL, 10);
-			if(!errno) {
-				lua_pushnumber(L, page_number);
+			int page_number = (int) strtol(page_name+page_name_num_idx, NULL, 10);
+			if (!errno) {
+				lua_pushinteger(L, page_number);
 			} else {
 				/* we can not parse this as a number, TODO: parse page names */
-				lua_pushnumber(L, -1);
+				lua_pushinteger(L, -1);
 			}
 		} else {
 			/* something we did not expect here */
-			lua_pushnumber(L, -1);
+			lua_pushinteger(L, -1);
 		}
-		lua_settable(L, -3);
+		lua_rawset(L, -3);
 
 		lua_pushstring(L, "depth");
-		lua_pushnumber(L, depth);
-		lua_settable(L, -3);
+		lua_pushinteger(L, depth);
+		lua_rawset(L, -3);
 
 		lua_pushstring(L, "title");
 		lua_pushstring(L, miniexp_to_str(miniexp_car(miniexp_nth(counter, lista))));
-		lua_settable(L, -3);
+		lua_rawset(L, -3);
 
-		lua_settable(L, -3);
-
-		(*count)++;
+		lua_rawseti(L, -2, (*count)++);
 
 		if (miniexp_length(miniexp_cdr(miniexp_nth(counter, lista))) > 1) {
 			walkTableOfContent(L, miniexp_cdr(miniexp_nth(counter, lista)), count, depth);
 		}
 		counter++;
 	}
-	return 0;
 }
 
 static int getTableOfContent(lua_State *L) {
 	DjvuDocument *doc = (DjvuDocument*) luaL_checkudata(L, 1, "djvudocument");
-	miniexp_t r;
-	int count = 1;
+	lua_settop(L, 0); // Pop function arg
 
+	miniexp_t r;
 	while ((r=ddjvu_document_get_outline(doc->doc_ref))==miniexp_dummy)
 		handle(L, doc->context, True);
 
 	//printf("lista: %s\n", miniexp_to_str(miniexp_car(miniexp_nth(1, miniexp_cdr(r)))));
 
-	lua_newtable(L);
+	lua_createtable(L, miniexp_length(r) - 1, 0); // pre-alloc for top-level elements, at least
+	int count = 1;
 	walkTableOfContent(L, r, &count, 0);
 
 	return 1;
@@ -388,8 +381,8 @@ static int getOriginalPageSize(lua_State *L) {
 		handle(L, doc->context, TRUE);
 	}
 
-	lua_pushnumber(L, info.width);
-	lua_pushnumber(L, info.height);
+	lua_pushinteger(L, info.width);
+	lua_pushinteger(L, info.height);
 
 	return 2;
 }
@@ -397,32 +390,28 @@ static int getOriginalPageSize(lua_State *L) {
 static int getPageInfo(lua_State *L) {
 	DjvuDocument *doc = (DjvuDocument*) luaL_checkudata(L, 1, "djvudocument");
 	int pageno = luaL_checkint(L, 2);
-	ddjvu_page_t *djvu_page;
-	int page_width, page_height, page_dpi;
-	double page_gamma;
-	ddjvu_page_type_t page_type;
-	char *page_type_str;
 
-	djvu_page = ddjvu_page_create_by_pageno(doc->doc_ref, pageno - 1);
+	ddjvu_page_t *djvu_page = ddjvu_page_create_by_pageno(doc->doc_ref, pageno - 1);
 	if (! djvu_page)
 		return luaL_error(L, "cannot create djvu_page #%d", pageno);
 
 	while (! ddjvu_page_decoding_done(djvu_page))
 		handle(L, doc->context, TRUE);
 
-	page_width = ddjvu_page_get_width(djvu_page);
-	lua_pushnumber(L, page_width);
+	int page_width = ddjvu_page_get_width(djvu_page);
+	lua_pushinteger(L, page_width);
 
-	page_height = ddjvu_page_get_height(djvu_page);
-	lua_pushnumber(L, page_height);
+	int page_height = ddjvu_page_get_height(djvu_page);
+	lua_pushinteger(L, page_height);
 
-	page_dpi = ddjvu_page_get_resolution(djvu_page);
-	lua_pushnumber(L, page_dpi);
+	int page_dpi = ddjvu_page_get_resolution(djvu_page);
+	lua_pushinteger(L, page_dpi);
 
-	page_gamma = ddjvu_page_get_gamma(djvu_page);
+	double page_gamma = ddjvu_page_get_gamma(djvu_page);
 	lua_pushnumber(L, page_gamma);
 
-	page_type = ddjvu_page_get_type(djvu_page);
+	const char *page_type_str;
+	ddjvu_page_type_t page_type = ddjvu_page_get_type(djvu_page);
 	switch (page_type) {
 		case DDJVU_PAGETYPE_UNKNOWN:
 			page_type_str = "UNKNOWN";
@@ -461,11 +450,17 @@ static int getPageInfo(lua_State *L) {
  *                   koptinterface convention origins at top-left.
  */
 void lua_settable_djvu_anno(lua_State *L, miniexp_t anno, int yheight) {
-	if (!L) return;
-	if (!miniexp_consp(anno)) return;
+	if (!L) {
+		return;
+	}
+	if (!miniexp_consp(anno)) {
+		return;
+	}
 
 	miniexp_t anno_type = miniexp_nth(SI_ZONE_NAME, anno);
-	if (!miniexp_symbolp(anno_type)) return;
+	if (!miniexp_symbolp(anno_type)) {
+		return;
+	}
 
 	int xmin = int_from_miniexp_nth(SI_ZONE_XMIN, anno);
 	int ymin = int_from_miniexp_nth(SI_ZONE_YMIN, anno);
@@ -486,10 +481,11 @@ void lua_settable_djvu_anno(lua_State *L, miniexp_t anno, int yheight) {
 			const char *txt = miniexp_to_str(data);
 			lua_setkeyval(L, string, zname, txt);
 		} else {
-			lua_pushinteger(L, tindex);
-			lua_newtable(L);
+			// New line or word!
+			lua_createtable(L, miniexp_length(data) - SI_ZONE_DATA, 4); // line/word = {}; pre-allocated to the correct amount of elements and its own box
 			lua_settable_djvu_anno(L, data, yheight);
-			lua_settable(L, LUA_SETTABLE_STACK_TOP);
+			// We're done with it, insert it in the page/line array
+			lua_rawseti(L, -2, tindex);
 		}
 	}
 }
@@ -497,6 +493,7 @@ void lua_settable_djvu_anno(lua_State *L, miniexp_t anno, int yheight) {
 static int getPageText(lua_State *L) {
 	DjvuDocument *doc = (DjvuDocument*) luaL_checkudata(L, 1, "djvudocument");
 	int pageno = luaL_checkint(L, 2);
+	lua_settop(L, 0); // Pop function args
 
 	/* get page height for coordinates transform */
 	ddjvu_pageinfo_t info;
@@ -509,17 +506,14 @@ static int getPageText(lua_State *L) {
 		return luaL_error(L, "cannot get page #%d information", pageno);
 
 	/* start retrieving page text */
-	miniexp_t sexp, se_line, se_word;
-	int i = 1, j = 1, counter_l = 1, counter_w=1,
-		nr_line = 0, nr_word = 0;
-	const char *word = NULL;
+	miniexp_t sexp;
 
 	while ((sexp = ddjvu_document_get_pagetext(doc->doc_ref, pageno-1, "word"))
 				== miniexp_dummy) {
 		handle(L, doc->context, True);
 	}
 
-	lua_newtable(L);
+	lua_createtable(L, miniexp_length(sexp) - SI_ZONE_DATA, 4); // page = {}; pre-allocated to the correct amount of lines and its page box
 	lua_settable_djvu_anno(L, sexp, info.height);
 	return 1;
 }
@@ -538,9 +532,10 @@ static int closePage(lua_State *L) {
 static int getPagePix(lua_State *L) {
 	DjvuPage *page = (DjvuPage*) luaL_checkudata(L, 1, "djvupage");
 	KOPTContext *kctx = (KOPTContext*) lua_topointer(L, 2);
+	ddjvu_render_mode_t mode = (int) luaL_checkint(L, 3);
 	ddjvu_rect_t prect;
 	ddjvu_rect_t rrect;
-	int px, py, pw, ph, rx, ry, rw, rh, status;
+	int px, py, pw, ph, rx, ry, rw, rh;
 
 	px = 0;
     py = 0;
@@ -562,7 +557,11 @@ static int getPagePix(lua_State *L) {
     rrect.y = ry * scale;
     rrect.w = rw * scale;
     rrect.h = rh * scale;
-    printf("rendering page:%d,%d,%d,%d\n",rrect.x,rrect.y,rrect.w,rrect.h);
+#ifdef DEBUG
+    printf("%s: rendering page: %u (%d,%d,%d,%d) [%s:%s]\n", __func__, page->num,
+           rrect.x, rrect.y, rrect.w, rrect.h,
+           page->doc->pixelsize == 3 ? "color" : "grey", render_mode_str(mode));
+#endif
 
 	WILLUSBITMAP *dst = &kctx->src;
 	bmp_init(dst);
@@ -577,75 +576,11 @@ static int getPagePix(lua_State *L) {
 	}
 
 	ddjvu_format_set_row_order(page->doc->pixelformat, 1);
-	ddjvu_page_render(page->page_ref, 0, &prect, &rrect, page->doc->pixelformat,
+	ddjvu_page_render(page->page_ref, mode, &prect, &rrect, page->doc->pixelformat,
 		bmp_bytewidth(dst), (char *) dst->data);
 
 	kctx->page_width = dst->width;
 	kctx->page_height = dst->height;
-
-	return 0;
-}
-
-static int reflowPage(lua_State *L) {
-	DjvuPage *page = (DjvuPage*) luaL_checkudata(L, 1, "djvupage");
-	KOPTContext *kctx = (KOPTContext*) lua_topointer(L, 2);
-	ddjvu_render_mode_t mode = (int) luaL_checkint(L, 3);
-	ddjvu_rect_t prect;
-	ddjvu_rect_t rrect;
-
-	int px, py, pw, ph, rx, ry, rw, rh, status;
-
-	px = 0;
-	py = 0;
-	pw = ddjvu_page_get_width(page->page_ref);
-	ph = ddjvu_page_get_height(page->page_ref);
-	prect.x = px;
-	prect.y = py;
-
-	rx = (int)kctx->bbox.x0;
-	ry = (int)kctx->bbox.y0;
-	rw = (int)(kctx->bbox.x1 - kctx->bbox.x0);
-	rh = (int)(kctx->bbox.y1 - kctx->bbox.y0);
-
-	double zoom = kctx->zoom*kctx->quality;
-	float scale = (1.5*zoom*kctx->dev_width) / (double)pw;
-	prect.w = pw * scale;
-	prect.h = ph * scale;
-	rrect.x = rx * scale;
-	rrect.y = ry * scale;
-	rrect.w = rw * scale;
-	rrect.h = rh * scale;
-	printf("rendering page:%d,%d,%d,%d\n",rrect.x,rrect.y,rrect.w,rrect.h);
-	kctx->zoom = scale;
-
-	WILLUSBITMAP *src = &kctx->src;
-	bmp_init(src);
-	src->width = rrect.w;
-	src->height = rrect.h;
-	src->bpp = 8*page->doc->pixelsize;
-
-	bmp_alloc(src);
-	if (src->bpp == 8) {
-		int ii;
-		for (ii = 0; ii < 256; ii++)
-		src->red[ii] = src->blue[ii] = src->green[ii] = ii;
-	}
-
-	ddjvu_format_set_row_order(page->doc->pixelformat, 1);
-
-	status = ddjvu_page_render(page->page_ref, mode, &prect, &rrect, page->doc->pixelformat,
-			bmp_bytewidth(src), (char *) src->data);
-
-	if (kctx->precache) {
-		pthread_t rf_thread;
-		pthread_attr_t attr;
-		pthread_attr_init(&attr);
-		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-		pthread_create(&rf_thread, &attr, (void *(*) (void *))k2pdfopt_reflow_bmp, (void*)kctx);
-		pthread_attr_destroy(&attr);
-	} else {
-		k2pdfopt_reflow_bmp(kctx);
-	}
 
 	return 0;
 }
@@ -676,7 +611,7 @@ static int drawPage(lua_State *L) {
 		}
 	}
 	ddjvu_format_set_gamma(page->doc->pixelformat, gamma);
-	int bbsize = (bb->w)*(bb->h)*page->doc->pixelsize;
+	size_t bbsize = (bb->w)*(bb->h)*page->doc->pixelsize;
 	uint8_t *imagebuffer = bb->data;
 
 	/*printf("@page %d, @@zoom:%f, offset: (%d, %d)\n", page->num, dc->zoom, dc->offset_x, dc->offset_y);*/
@@ -711,8 +646,10 @@ static int drawPage(lua_State *L) {
 	 * So we don't set rotation here.
 	 */
 
-	if (!ddjvu_page_render(page->page_ref, djvu_render_mode, &pagerect, &renderrect, page->doc->pixelformat, bb->w*page->doc->pixelsize, imagebuffer))
+	if (!ddjvu_page_render(page->page_ref, djvu_render_mode, &pagerect, &renderrect, page->doc->pixelformat, bb->w*page->doc->pixelsize, (void *)imagebuffer)) {
+		// Clear to white on failure
 		memset(imagebuffer, 0xFF, bbsize);
+	}
 
 	return 0;
 }
@@ -721,7 +658,7 @@ static int getCacheSize(lua_State *L) {
 	DjvuDocument *doc = (DjvuDocument*) luaL_checkudata(L, 1, "djvudocument");
 	unsigned long size = ddjvu_cache_get_size(doc->context);
 	//printf("## ddjvu_cache_get_size = %d\n", (int)size);
-	lua_pushnumber(L, size);
+	lua_pushinteger(L, size);
 	return 1;
 }
 
@@ -759,7 +696,6 @@ static const struct luaL_Reg djvupage_meth[] = {
 	{"getPagePix", getPagePix},
 	{"close", closePage},
 	{"__gc", closePage},
-	{"reflow", reflowPage},
 	{"draw", drawPage},
 	{NULL, NULL}
 };

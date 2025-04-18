@@ -1,263 +1,278 @@
-include Makefile.defs
+KOR_BASE ?= .
 
+# Are we being included?
+STANDALONE := $(if $(filter-out $(lastword $(MAKEFILE_LIST)),$(MAKEFILE_LIST)),,1)
+
+ifeq (,$(STANDALONE))
+  BASE_PREFIX = base-
+else
+  include $(KOR_BASE)/Makefile.defs
+endif
+
+# As we do not want to run parallel ninja invocations into the
+# same directory (e.g. when invoked with `make mupdf k2pdfopt`),
+# we disable parallelisation for this top-level Makefile.
+.NOTPARALLEL:
+
+define build_info
 $(info ************ Building for MACHINE: "$(MACHINE)" **********)
 $(info ************ PATH: "$(PATH)" **********)
 $(info ************ CHOST: "$(CHOST)" **********)
+$(info ************ NINJA: $(strip $(NINJA) $(PARALLEL_JOBS:%=-j%) $(PARALLEL_LOAD:%=-l%)) **********)
+$(info ************ MAKE: $(strip $(MAKE) $(PARALLEL_JOBS:%=-j%) $(PARALLEL_LOAD:%=-l%)) **********)
+endef
 
-# main target
-all: $(OUTPUT_DIR)/libs $(if $(ANDROID),,$(LUAJIT)) \
-		$(if $(USE_LUAJIT_LIB),$(LUAJIT_LIB),) \
-		$(LUAJIT_JIT) \
-		libs $(K2PDFOPT_LIB) \
-		$(OUTPUT_DIR)/spec/base $(OUTPUT_DIR)/common $(OUTPUT_DIR)/rocks \
-		$(OUTPUT_DIR)/plugins $(LUASOCKET) \
-		$(OUTPUT_DIR)/ffi $(OUTPUT_DIR)/data \
-		$(if $(WIN32),,$(LUASEC)) \
-		$(if $(ANDROID),$(LUACOMPAT52) $(LUALONGNUMBER),) \
-		$(if $(WIN32),,$(EVERNOTE_LIB)) \
-		$(LUASERIAL_LIB) \
-		$(TURBOJPEG_LIB) \
-		$(LODEPNG_LIB) \
-		$(GIF_LIB) \
-		$(if $(USE_LJ_WPACLIENT),$(LJ_WPACLIENT),) \
-		$(TURBO_FFI_WRAP_LIB) \
-		$(LUA_SPORE_ROCK) \
-		$(if $(ANDROID),$(LPEG_DYNLIB) $(LPEG_RE),) \
-		$(if $(WIN32),,$(ZMQ_LIB) $(CZMQ_LIB) $(FILEMQ_LIB) $(ZYRE_LIB)) \
-		$(if $(WIN32),,$(OUTPUT_DIR)/sdcv) \
-		$(if $(or $(DARWIN),$(WIN32),$(ANDROID),$(UBUNTUTOUCH),$(APPIMAGE)),,$(OUTPUT_DIR)/dropbear) \
-		$(if $(or $(KINDLE),$(KOBO),$(CERVANTES)),$(OUTPUT_DIR)/sftp-server,) \
-		$(if $(or $(DARWIN),$(WIN32)),,$(OUTPUT_DIR)/tar) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(REMARKABLE)),$(OUTPUT_DIR)/fbink,) \
-		$(if $(REMARKABLE),$(OUTPUT_DIR)/button-listen,) \
-		$(SQLITE_LIB) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(CURL_LIB),) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(OUTPUT_DIR)/zsync2,) \
-		$(LUA_LJ_SQLITE) $(OUTPUT_DIR)/common/xsys.lua
-ifndef EMULATE_READER
-ifndef KODEBUG
-	STRIP_FILES="\
-		$(if $(WIN32),,$(OUTPUT_DIR)/sdcv) \
-		$(if $(WIN32),,$(OUTPUT_DIR)/tar) \
-		$(if $(or $(DARWIN),$(WIN32),$(ANDROID),$(UBUNTUTOUCH),$(APPIMAGE)),,$(OUTPUT_DIR)/dropbear) \
-		$(if $(or $(KINDLE),$(KOBO),$(CERVANTES)),$(OUTPUT_DIR)/sftp-server,) \
-		$(if $(or $(KINDLE),$(KOBO)),$(OUTPUT_DIR)/scp,) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(REMARKABLE)),$(OUTPUT_DIR)/fbink,) \
-		$(if $(REMARKABLE),$(OUTPUT_DIR)/button-listen,) \
-		$(if $(or $(KOBO),$(REMARKABLE)),$(OUTPUT_DIR)/fbdepth,) \
-		$(if $(or $(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(OUTPUT_DIR)/zsync2,) \
-		$(if $(ANDROID),,$(LUAJIT)) \
-		$(OUTPUT_DIR)/libs/$(if $(WIN32),*.dll,*.so*)" ;\
-	$(STRIP) --strip-unneeded $${STRIP_FILES} ;\
-	touch -r $${STRIP_FILES}  # let all files have the same mtime
-	find $(OUTPUT_DIR)/common -name "$(if $(WIN32),*.dll,*.so*)" | \
-		xargs $(STRIP) --strip-unneeded
-endif
-endif
-	# set up some needed paths and links
-	install -d $(OUTPUT_DIR)/{cache,history,clipboard,fonts} $(CURDIR)/$(EVERNOTE_THRIFT_DIR)
-	ln -sf $(CURDIR)/$(THIRDPARTY_DIR)/kpvcrlib/cr3.css $(OUTPUT_DIR)/data/
-ifndef DARWIN
-	# setup Evernote SDK
-	cd $(EVERNOTE_SDK_DIR) && \
-		$(RCP) *.lua evernote $(CURDIR)/$(EVERNOTE_PLUGIN_DIR) && \
-		cp thrift/*.lua $(CURDIR)/$(EVERNOTE_THRIFT_DIR)
-endif
-	test -e $(LPEG_RE) && chmod 664 $(LPEG_RE) || true  # hot fix re.lua permission
+PHONY += $(addprefix $(BASE_PREFIX),all clean distclean fetchthirdparty re reinstall test uninstall)
+PHONY += bininfo bincheck buildstats info %-re setup skeleton test-data
+SOUND += cache-key build/% $(OUTPUT_DIR)/% $(STAGING_DIR)/bincheck/%
 
-$(OUTPUT_DIR)/libs:
-	install -d $(OUTPUT_DIR)/libs
+# Main rules. {{{
 
-$(OUTPUT_DIR)/common:
-	install -d $(OUTPUT_DIR)/common
+$(BASE_PREFIX)all: $(BUILD_ENTRYPOINT)
 
-$(OUTPUT_DIR)/rocks:
-	install -d $(OUTPUT_DIR)/rocks
+$(BASE_PREFIX)clean:
+	rm -rf $(OUTPUT_DIR)
 
-$(OUTPUT_DIR)/plugins:
-	install -d $(OUTPUT_DIR)/plugins
+$(BASE_PREFIX)distclean:
+	rm -rf $(dir $(filter $(KOR_BASE)/build/%,$(OUTPUT_DIR))) $(wildcard $(THIRDPARTY_DIR)/*/build $(THIRDPARTY_DIR)/spec/*/build)
 
-$(OUTPUT_DIR)/ffi:
-	ln -sf ../../ffi $(OUTPUT_DIR)/
+info:
+	$(strip $(build_info))
 
-$(OUTPUT_DIR)/data:
-	ln -sf $(CRENGINE_SRC_DIR)/cr3gui/data $(OUTPUT_DIR)/data
+$(BASE_PREFIX)re: $(BASE_PREFIX)clean
+	$(MAKE) $(BASE_PREFIX)all
 
-# our own Lua/C/C++ interfacing:
+%-re:
+	$(MAKE) $*-clean
+	$(MAKE) $*
 
-libs: \
-	$(if $(or $(SDL),$(ANDROID)),,$(OUTPUT_DIR)/libs/libkoreader-input.so) \
-	$(if $(or $(SDL),$(ANDROID),$(CERVANTES),$(KINDLE),$(KOBO),$(POCKETBOOK),$(REMARKABLE),$(SONY_PRSTUX)),$(OUTPUT_DIR)/libs/libblitbuffer.so,) \
-	$(if $(APPIMAGE),$(OUTPUT_DIR)/libs/libXss.so.1,) \
-	$(OUTPUT_DIR)/libs/libkoreader-lfs.so \
-	$(OUTPUT_DIR)/libs/libkoreader-djvu.so \
-	$(OUTPUT_DIR)/libs/libkoreader-cre.so \
-	$(OUTPUT_DIR)/libs/libkoreader-xtext.so \
-	$(OUTPUT_DIR)/libs/libwrap-mupdf.so
+$(BASE_PREFIX)fetchthirdparty:
+	git submodule init
+	git submodule sync
+	git submodule update --jobs 3 $(if $(CI),--depth 1)
 
-$(OUTPUT_DIR)/libs/libkoreader-input.so: input/*.c input/*.h $(if $(KINDLE),$(POPEN_NOSHELL_LIB),)
-	@echo "Building koreader input module..."
-	$(CC) $(DYNLIB_CFLAGS) -I$(POPEN_NOSHELL_DIR) -I./input \
-		$(if $(CERVANTES),-DCERVANTES,) $(if $(KOBO),-DKOBO,) $(if $(KINDLE),-DKINDLE,) $(if $(POCKETBOOK),-DPOCKETBOOK,) $(if $(REMARKABLE),-DREMARKABLE,) $(if $(SONY_PRSTUX),-DSONY_PRSTUX,)\
-		-o $@ \
-		input/input.c \
-		$(if $(KINDLE),$(POPEN_NOSHELL_LIB),) \
-		$(if $(POCKETBOOK),-linkview,)
+$(BASE_PREFIX)reinstall: $(BASE_PREFIX)uninstall
+	$(MAKE) $(BASE_PREFIX)all
 
-$(OUTPUT_DIR)/libs/libkoreader-lfs.so: \
-			$(if $(USE_LUAJIT_LIB),$(LUAJIT_LIB),) \
-			luafilesystem/src/lfs.c
-	$(CC) $(DYNLIB_CFLAGS) -o $@ $^
-ifdef DARWIN
-	install_name_tool -change \
-		`otool -L "$@" | grep "libluajit" | awk '{print $$1}'` \
-		libs/$(notdir $(LUAJIT_LIB)) \
-		$@
-endif
+$(BASE_PREFIX)uninstall:
+	rm -vrf $(filter-out $(CMAKE_DIR) $(OUTPUT_DIR)/thirdparty,$(wildcard $(OUTPUT_DIR)/*))
+	$(MAKE) rm-install-stamps
 
-# put all the libs to the end of compile command to make ubuntu's tool chain
-# happy
-$(OUTPUT_DIR)/libs/libkoreader-djvu.so: djvu.c \
-			$(if $(USE_LUAJIT_LIB),$(LUAJIT_LIB),) \
-			$(DJVULIBRE_LIB) $(K2PDFOPT_LIB)
-	$(CC) -I$(DJVULIBRE_DIR) -I$(MUPDF_DIR)/include $(K2PDFOPT_CFLAGS) \
-		$(DYNLIB_CFLAGS) -o $@ $^ $(if $(ANDROID),,-lpthread)
-ifdef DARWIN
-	install_name_tool -change \
-		`otool -L "$@" | grep "libluajit" | awk '{print $$1}'` \
-		libs/$(notdir $(LUAJIT_LIB)) \
-		$@
-	install_name_tool -change \
-		`otool -L "$@" | grep "$(notdir $(DJVULIBRE_LIB)) " | awk '{print $$1}'` \
-		libs/$(notdir $(DJVULIBRE_LIB)) \
-		$@
-	install_name_tool -change \
-		`otool -L "$@" | grep "$(notdir $(K2PDFOPT_LIB)) " | awk '{print $$1}'` \
-		libs/$(notdir $(K2PDFOPT_LIB)) \
-		$@
-endif
+# }}}
 
-$(OUTPUT_DIR)/libs/libkoreader-cre.so: cre.cpp \
-			$(if $(USE_LUAJIT_LIB),$(LUAJIT_LIB),) \
-			$(CRENGINE_LIB)
-	$(CXX) -I$(CRENGINE_SRC_DIR)/crengine/include/ $(DYNLIB_CXXFLAGS) \
-		-DLDOM_USE_OWN_MEM_MAN=$(if $(WIN32),0,1) \
-		$(if $(WIN32),-DQT_GL=1) -static-libstdc++ -o $@ $^
-ifdef DARWIN
-	install_name_tool -change \
-		`otool -L "$@" | grep "libluajit" | awk '{print $$1}'` \
-		libs/$(notdir $(LUAJIT_LIB)) \
-		$@
-	install_name_tool -change \
-		`otool -L "$@" | grep "$(notdir $(CRENGINE_LIB)) " | awk '{print $$1}'` \
-		libs/$(notdir $(CRENGINE_LIB)) \
-		$@
-endif
+# CMake build interface. {{{
 
-$(OUTPUT_DIR)/libs/libkoreader-xtext.so: xtext.cpp \
-			$(if $(USE_LUAJIT_LIB),$(LUAJIT_LIB),) \
-			$(FREETYPE_LIB) $(HARFBUZZ_LIB) $(FRIBIDI_LIB) $(LIBUNIBREAK_LIB)
-	$(CXX) -I$(FREETYPE_DIR)/include/freetype2 \
-	-I$(HARFBUZZ_DIR)/include/harfbuzz \
-	-I$(FRIBIDI_DIR)/include \
-	-I$(LIBUNIBREAK_DIR)/include \
-	$(DYNLIB_CXXFLAGS) -static-libstdc++ -Wall -o $@ $^
-ifdef DARWIN
-	install_name_tool -change \
-		`otool -L "$@" | grep "libluajit" | awk '{print $$1}'` \
-		libs/$(notdir $(LUAJIT_LIB)) \
-		$@
-	install_name_tool -change \
-		`otool -L "$@" | grep "$(notdir $(HARFBUZZ_LIB)) " | awk '{print $$1}'` \
-		libs/$(notdir $(HARFBUZZ_LIB)) \
-		$@
-	install_name_tool -change \
-		`otool -L "$@" | grep "$(notdir $(FRIBIDI_LIB)) " | awk '{print $$1}'` \
-		libs/$(notdir $(FRIBIDI_LIB)) \
-		$@
+setup $(BUILD_ENTRYPOINT): $(CMAKE_KOVARS) $(CMAKE_TCF) $(MESON_CROSS_TOOLCHAIN) $(MESON_HOST_TOOLCHAIN)
+	$(strip $(build_info))
+	$(CMAKE) $(CMAKE_FLAGS) -S $(KOR_BASE)/cmake -B $(CMAKE_DIR)
+
+define write_file
+$(if $(DRY_RUN),: write $1,$(file >$1,$2))
+endef
+
+$(CMAKE_KOVARS): $(KOR_BASE)/Makefile.defs | $(CMAKE_DIR)/
+	$(call write_file,$@,$(cmake_koreader_vars))
+
+$(CMAKE_TCF): $(KOR_BASE)/Makefile.defs | $(CMAKE_DIR)/
+	$(call write_file,$@,$(if $(EMULATE_READER),$(cmake_toolchain),$(cmake_cross_toolchain)))
+
+$(CMAKE_DIR)/meson_%.ini: $(KOR_BASE)/Makefile.defs | $(CMAKE_DIR)/
+	$(call write_file,$@,$(meson_$*))
+
+# Forward unknown targets to the CMake build system.
+LEFTOVERS = $(filter-out $(PHONY) $(SOUND),$(MAKECMDGOALS))
+.PHONY: $(LEFTOVERS)
+$(BASE_PREFIX)all $(LEFTOVERS): skeleton $(BUILD_ENTRYPOINT)
+	$(and $(DRY_RUN),$(wildcard $(BUILD_ENTRYPOINT)),+)cd $(CMAKE_DIR) && $(strip $(NINJA) $(NINJAFLAGS) $(patsubst $(BASE_PREFIX)all,all,$@))
+
+# }}}
+
+# Output skeleton. {{{
+
+CR3GUI_DATADIR = $(THIRDPARTY_DIR)/kpvcrlib/crengine/cr3gui/data
+
+define SKELETON
+$(CMAKE_DIR)/
+$(OUTPUT_DIR)/cache/
+$(OUTPUT_DIR)/clipboard/
+$(OUTPUT_DIR)/data/
+$(OUTPUT_DIR)/data/dict
+$(OUTPUT_DIR)/data/tessdata
+$(OUTPUT_DIR)/ffi
+$(OUTPUT_DIR)/fonts/
+$(STAGING_DIR)/
+endef
+
+skeleton: $(strip $(SKELETON))
+
+$(OUTPUT_DIR)/data/%: $(CR3GUI_DATADIR)/% | $(OUTPUT_DIR)/data/
+	$(SYMLINK) $(CR3GUI_DATADIR)/$* $@
+
+$(CR3GUI_DATADIR)/%:
+	mkdir $@
+
+$(OUTPUT_DIR)/ffi: | $(OUTPUT_DIR)/
+	$(SYMLINK) $(KOR_BASE)/ffi $@
+
+$(OUTPUT_DIR)/:
+	mkdir -p $@
+
+$(OUTPUT_DIR)/%/:
+	mkdir -p $@
+
+# }}}
+
+# Testsuite support. {{{
+
+ifneq (,$(EMULATE_READER))
+
+download-all: test-data
+
+$(OUTPUT_DIR)/spec/base: | $(OUTPUT_DIR)/spec/
+	$(SYMLINK) $(KOR_BASE)/spec $@
+
+$(addprefix $(OUTPUT_DIR)/spec/,config.lua helper.lua): | $(OUTPUT_DIR)/spec/
+	$(SYMLINK) $(KOR_BASE)/test-runner/busted_$(notdir $@) $@
+
+$(addprefix $(OUTPUT_DIR)/spec/,meson.build runtests): | $(OUTPUT_DIR)/spec/
+	$(SYMLINK) $(KOR_BASE)/test-runner/$(notdir $@) $@
+
+$(BASE_PREFIX)test: $(BASE_PREFIX)all test-data
+	$(RUNTESTS) $(OUTPUT_DIR) base $T
+
+define test_data_common
+$(OUTPUT_DIR)/spec/config.lua
+$(OUTPUT_DIR)/spec/helper.lua
+$(OUTPUT_DIR)/spec/meson.build
+$(OUTPUT_DIR)/spec/runtests
+endef
+
+skeleton: $(strip $(test_data_common))
+
+define test_data_base
+$(OUTPUT_DIR)/data/tessdata/eng.traineddata
+$(OUTPUT_DIR)/fonts/droid/DroidSansMono.ttf
+$(OUTPUT_DIR)/spec/base
+endef
+
+test-data: $(strip $(test_data_common) $(test_data_base))
+
+TESSDATA_FILE = $(THIRDPARTY_DIR)/tesseract/build/downloads/eng.traineddata
+TESSDATA_FILE_URL = https://github.com/tesseract-ocr/tessdata/raw/4.1.0/$(notdir $(TESSDATA_FILE))
+TESSDATA_FILE_SHA1 = 007b522901a665bc2037428602d4d527f5ead7ed
+
+$(OUTPUT_DIR)/data/tessdata/eng.traineddata: $(TESSDATA_FILE) | $(OUTPUT_DIR)/data/tessdata
+	$(SYMLINK) $(TESSDATA_FILE) $@
+
+$(TESSDATA_FILE):
+	mkdir -p $(dir $(TESSDATA_FILE))
+	$(call wget_and_validate,$(TESSDATA_FILE),$(TESSDATA_FILE_URL),$(TESSDATA_FILE_SHA1))
+
+DROID_FONT = $(THIRDPARTY_DIR)/fonts/build/downloads/DroidSansMono.ttf
+DROID_FONT_URL = https://github.com/koreader/koreader-fonts/raw/master/droid/$(notdir $(DROID_FONT))
+DROID_FONT_SHA1 = 0b75601f8ef8e111babb6ed11de6573f7178ce44
+
+$(OUTPUT_DIR)/fonts/droid/DroidSansMono.ttf: $(DROID_FONT) | $(OUTPUT_DIR)/fonts/
+	$(SYMLINK) $(dir $(DROID_FONT)) $(OUTPUT_DIR)/fonts/droid
+
+$(DROID_FONT):
+	mkdir -p $(dir $(DROID_FONT))
+	$(call wget_and_validate,$(DROID_FONT),$(DROID_FONT_URL),$(DROID_FONT_SHA1))
+
 endif
 
-$(OUTPUT_DIR)/libs/libblitbuffer.so: blitbuffer.c
-	$(CC) $(DYNLIB_CFLAGS) $(VECTO_CFLAGS) -o $@ $^
+# }}}
 
-$(OUTPUT_DIR)/libs/libwrap-mupdf.so: wrap-mupdf.c \
-			$(MUPDF_LIB)
-	$(CC) -I$(MUPDF_DIR)/include $(DYNLIB_CFLAGS) -o $@ $^
-ifdef DARWIN
-	install_name_tool -id \
-		libs/libwrap-mupdf.so \
-		$@
+# CI helpers. {{{
+
+define cache_key_cmd
+git -C $(KOR_BASE) ls-files -z
+--cached --ignored --exclude-from=$(abspath $1)
+| xargs -0 git -C $(KOR_BASE) ls-tree @
+endef
+
+cache-key: $(KOR_BASE)/Makefile $(KOR_BASE)/cache-key.base
+	$(strip $(call cache_key_cmd,$(KOR_BASE)/cache-key.base)) | tee $@
+
+# }}}
+
+# Dump/check binaries runtime path and dependencies. {{{
+
+define BINARY_PATHS
+$(filter-out
+  $(addprefix $(OUTPUT_DIR)/,cmake spec staging thirdparty),
+    $(wildcard $(OUTPUT_DIR)/*))
+endef
+
+bininfo:
+	@$(KOR_BASE)/utils/bininfo.py $(BINARY_PATHS)
+
+ifneq (,$(filter bincheck,$(MAKECMDGOALS)))
+
+BINCHECK_DEPS :=
+BINCHECK_LD_PATH :=
+
+# Preload.
+ifeq (,$(USE_LUAJIT_LIB))
+  # When not using the luajit library, preload
+  # luajit so the LUA API' symbols are available.
+  BINCHECK_DEPS += $(OUTPUT_DIR)/luajit
+  BINCHECK_LD_PATH += $(OUTPUT_DIR)/luajit
 endif
 
-$(OUTPUT_DIR)/libs/libXss.so.1: libxss-dummy.c
-	$(CC) $(DYNLIB_CFLAGS) -o $@ $^
-
-ffi/mupdf_h.lua: ffi-cdecl/mupdf_decl.c $(MUPDF_DIR)/include
-	CPPFLAGS="$(CFLAGS) -I. -I$(MUPDF_DIR)/include" $(FFI_CDECL) gcc ffi-cdecl/mupdf_decl.c $@
-
-ffi/SDL2_0_h.lua: ffi-cdecl/SDL2_0_decl.c
-	CPPFLAGS="$(CFLAGS) -I. -LSDL2" $(FFI_CDECL) gcc ffi-cdecl/SDL2_0_decl.c $@
-
-ffi/lodepng_h.lua: ffi-cdecl/lodepng_decl.c $(LODEPNG_DIR)
-	CPPFLAGS="$(CFLAGS) -I. -I$(LODEPNG_DIR)" $(FFI_CDECL) gcc ffi-cdecl/lodepng_decl.c $@
-
-# include all third party libs
-include Makefile.third
-
-# ===========================================================================
-# very simple "launcher" for koreader on the remarkable
-
-$(OUTPUT_DIR)/button-listen: button-listen.c
-	$(CC) $(CFLAGS) -o $@ $^
-
-# ===========================================================================
-# the attachment extraction tool:
-
-$(OUTPUT_DIR)/extr: extr.c $(MUPDF_LIB) $(MUPDF_DIR)/include $(JPEG_LIB) $(FREETYPE_LIB)
-	$(CC) -I$(MUPDF_DIR) -I$(MUPDF_DIR)/include \
-		$(CFLAGS) -Wl,-rpath,'libs' -o $@ $^
-
-# ===========================================================================
-# helper target for creating standalone android toolchain from NDK
-# NDK variable should be set in your environment and it should point to
-# the root directory of the NDK
-#
-# --deprecated-headers is necessary in NDK 15, but will fail in 12-14
-android-toolchain:
-ifneq ($(wildcard $(NDK)/build/tools),)
-	$(NDK)/build/tools/make_standalone_toolchain.py --force --install-dir=$(ANDROID_TOOLCHAIN) \
-		--arch $(ANDROID_ARCH) --api $(NDKABI) --deprecated-headers || \
-	$(NDK)/build/tools/make_standalone_toolchain.py --force --install-dir=$(ANDROID_TOOLCHAIN) \
-		--arch $(ANDROID_ARCH) --api $(NDKABI)
+# Stubs for platform libraries.
+ifneq (,$(POCKETBOOK))
+  BINCHECK_DEPS += $(STAGING_DIR)/bincheck/libinkview.so
+endif
+ifneq (,$(KINDLE))
+  BINCHECK_DEPS += $(STAGING_DIR)/bincheck/liblipc.so
 endif
 
-# ===========================================================================
-# helper target for initializing third-party code
+# Library directories.
+BINCHECK_LD_PATH += $(STAGING_DIR)/bincheck $(OUTPUT_DIR)/libs
 
-clean:
-	-rm -rf $(OUTPUT_DIR)/*
-	-rm -rf $(THIRDPARTY_DIR)/{$(CMAKE_THIRDPARTY_LIBS)}/build/$(MACHINE)
+# Sysroot.
+define sysroot_libdir
+  $(dir $(abspath $(or
+    $(filter /%,$(shell $(CC) -print-file-name=$1)),
+    $(error could not find library directory for `$1`))))
+endef
+ifneq (,$(EMULATE_READER))
+  ifeq (,$(DARWIN))
+    BINCHECK_LD_PATH += $(call sysroot_libdir,libc.so)
+  endif
+else ifneq (,$(ANDROID))
+  BINCHECK_LD_PATH += $(call sysroot_libdir,libc.so)
+  BINCHECK_LD_PATH += $(call sysroot_libdir,libc++_shared.so)
+else
+  BINCHECK_LD_PATH += $(call sysroot_libdir,libc.so.6)
+endif
 
-distclean:
-	-rm -rf build
-	-rm -rf $(THIRDPARTY_DIR)/{$(CMAKE_THIRDPARTY_LIBS)}/build
+bincheck: $(BINCHECK_DEPS)
+	$(KOR_BASE)/utils/bincheck.py $(if $(GLIBC_VERSION_MAX),--glibc-version-max $(GLIBC_VERSION_MAX) )'$(subst $(empty) $(empty),:,$(strip $(BINCHECK_LD_PATH)))' $(BINARY_PATHS)
 
-# ===========================================================================
-# start of unit tests section
+endif
 
-$(OUTPUT_DIR)/.busted:
-	test -e $(OUTPUT_DIR)/.busted || \
-		ln -sf ../../.busted $(OUTPUT_DIR)/
+$(STAGING_DIR)/bincheck/%.so: $(KOR_BASE)/utils/bincheck/%.c | $(STAGING_DIR)/bincheck/
+	$(CC) $(DYNLIB_LDFLAGS) -o $@ $<
 
-$(OUTPUT_DIR)/spec/base:
-	install -d $(OUTPUT_DIR)/spec
-	test -e $(OUTPUT_DIR)/spec/base || \
-		ln -sf ../../../spec $(OUTPUT_DIR)/spec/base
+# }}}
 
-test: $(OUTPUT_DIR)/spec $(OUTPUT_DIR)/.busted
-	cd $(OUTPUT_DIR) && \
-		./luajit $(shell which busted) \
-		--exclude-tags=notest \
-		-o gtest ./spec/base/unit
+# }}}
 
-.PHONY: all android-toolchain clean distclean test
+# Dump build timings for last ninja invocation. {{{
+
+# Show external project tasks with a duration of 1s or more (descending order).
+define buildstats_jq_script
+  sort_by(-.dur) | .[] | select(.dur >= 1e6) | (.dur*1e-5 | round | ./10), "\n",
+  (.name | sub("(.*[/ ])?(?<p>[^/]*)/stamp/(?<t>[^/]*)$$"; "\(.p) \(.t)")), "\n"
+endef
+
+buildstats: $(CMAKE_DIR)/.ninja_log
+	ninjatracing $< | jq -j '$(strip $(buildstats_jq_script))' | \
+	    xargs -n3 printf '%6.2fs %s %s\n' | \
+	    git column --mode=row
+
+# }}}
+
+# vim: foldmethod=marker foldlevel=0

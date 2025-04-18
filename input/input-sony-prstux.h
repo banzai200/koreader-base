@@ -78,7 +78,7 @@ static void generateFakeEvent(int pipefd[2]) {
 
     re = ue_init_listener(&listener);
     if (re < 0) {
-        fprintf(stderr, "[sony-prstux-fake-event] Failed to initilize libue listener, err: %d\n", re);
+        fprintf(stderr, "[sony-prstux-fake-event] Failed to initialize libue listener (%d)\n", re);
         return;
     }
 
@@ -92,7 +92,7 @@ static void generateFakeEvent(int pipefd[2]) {
             if (prev_battery_state != battery_state) {
                 switch(battery_state) {
                     case SONY_PRSTUX_BATTERY_STATE_CHARGING:
-                        ev.code = CODE_FAKE_USB_PLUG_IN;
+                        ev.code = CODE_FAKE_USB_PLUGGED_IN_TO_HOST;
                         sendEvent(pipefd[1], &ev);
                         ev.code = CODE_FAKE_CHARGING;
                         sendEvent(pipefd[1], &ev);
@@ -102,7 +102,7 @@ static void generateFakeEvent(int pipefd[2]) {
                         sendEvent(pipefd[1], &ev);
                     break;
                     case SONY_PRSTUX_BATTERY_STATE_DISCHARGING:
-                        ev.code = CODE_FAKE_USB_PLUG_OUT;
+                        ev.code = CODE_FAKE_USB_PLUGGED_OUT_OF_HOST;
                         sendEvent(pipefd[1], &ev);
                         ev.code = CODE_FAKE_NOT_CHARGING;
                         sendEvent(pipefd[1], &ev);

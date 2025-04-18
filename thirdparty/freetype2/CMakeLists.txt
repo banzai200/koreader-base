@@ -1,44 +1,36 @@
-project(freetype2)
-cmake_minimum_required(VERSION 3.5.1)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-enable_language(C CXX)
-
-assert_var_defined(CXX)
-assert_var_defined(CXXFLAGS)
-assert_var_defined(LDFLAGS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
-
-set(CFG_ENV_VAR "CC=\"${CC}\" CXX=\"${CXX}\" CFLAGS=\"${CFLAGS}\" CXXFLAGS=\"${CXXFLAGS}\" LDFLAGS=\"${LDFLAGS}\"")
-set(CFG_OPTS "-q --prefix=${BINARY_DIR} --disable-static --enable-shared --with-zlib=no --with-bzip2=no --with-png=no --with-harfbuzz=no --host=\"${CHOST}\"")
-set(CFG_CMD sh -c "${CFG_ENV_VAR} ${SOURCE_DIR}/configure ${CFG_OPTS}")
-
-if($ENV{ANDROID})
-    set(CFG_CMD "${CFG_CMD} && ${ISED} 's|version_type=none|version_type=linux|' libtool")
-    set(CFG_CMD "${CFG_CMD} && ${ISED} 's|need_lib_prefix=no|need_lib_prefix=yes|' libtool")
-    set(CFG_CMD "${CFG_CMD} && ${ISED} 's|need_version=no|need_version=yes|' libtool")
-    set(CFG_CMD "${CFG_CMD} && ${ISED} 's|library_names_spec=.*|library_names_spec=\"\\\\\$libname\\\\\$release\\\\\$shared_ext\\\\\$versuffix \\\\\$libname\\\\\$release\\\\\$shared_ext\\\\\$major \\\\\$libname\\\\\$shared_ext\"|' libtool")
-    set(CFG_CMD "${CFG_CMD} && ${ISED} 's|soname_spec=.*|soname_spec=\"\\\\\$libname\\\\\$release\\\\\$shared_ext\\\\\$major\"|' libtool")
-endif()
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://gitlab.com/koreader/freetype2.git
-    VER-2-10-1
-    ${SOURCE_DIR}
+list(APPEND PATCH_FILES
+    fix_meson_bzip2_option.patch
+    # Work around GCC 12 ARM NEON bug (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=117811).
+    ftcalc_gcc12_arm_neon_fix.patch
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    PATCH_COMMAND ./autogen.sh
+list(APPEND CFG_CMD COMMAND
+    ${MESON_SETUP} --default-library=$<IF:$<BOOL:${MONOLIBTIC}>,static,shared>
+    -Dmmap=enabled
+    -Dzlib=disabled
+    ${SOURCE_DIR}
+)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    list(APPEND CMAKE_ARGS -DFT_ENABLE_ERROR_STRINGS=TRUE)
+endif()
+
+list(APPEND BUILD_CMD COMMAND ninja)
+
+list(APPEND INSTALL_CMD COMMAND ${MESON_INSTALL})
+
+if(NOT MONOLIBTIC)
+    set(LIB_SPEC freetype VERSION 6)
+    if(APPLE)
+        append_shared_lib_fix_commands(INSTALL_CMD ${LIB_SPEC} ID)
+    endif()
+    append_shared_lib_install_commands(INSTALL_CMD ${LIB_SPEC})
+endif()
+
+external_project(
+    DOWNLOAD URL 4425315beb50f913ae12d643e4e121e1
+    https://github.com/freetype/freetype/archive/refs/tags/VER-2-13-3.tar.gz
+    PATCH_FILES ${PATCH_FILES}
     CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS}
-    INSTALL_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} install
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

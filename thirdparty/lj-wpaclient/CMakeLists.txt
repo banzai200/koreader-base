@@ -1,25 +1,15 @@
-project(lj-wpaclient)
-cmake_minimum_required(VERSION 3.5.1)
+# Build in source tree.
+set(BINARY_DIR ${SOURCE_DIR})
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-ep_get_source_dir(SOURCE_DIR)
-
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
-    https://github.com/koreader/lj-wpaclient.git
-    880904033e4b145cbda72108c673decdd9d7be08
-    ${SOURCE_DIR}
+append_install_commands(INSTALL_CMD
+    consts_h.lua poll_h.lua select_h.lua
+    socket_h.lua socket.lua time_h.lua
+    wpaclient.lua wpa_ctrl.lua
+    DESTINATION ${OUTPUT_DIR}/common/lj-wpaclient
 )
 
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    BUILD_IN_SOURCE 1
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-    INSTALL_COMMAND ""
+external_project(
+    DOWNLOAD GIT 0d5c8ee336b699dbb35850a7336d24e89e1aac24
+    https://github.com/koreader/lj-wpaclient.git
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

@@ -1,78 +1,129 @@
-SHELL:=/bin/bash
+ifneq (4.1,$(firstword $(sort $(MAKE_VERSION) 4.1)))
+  $(error your version of make is too old: $(MAKE_VERSION), need at least 4.1)
+endif
+
+# Prevent make from removing targets it considers as intermediate.
+.SECONDARY:
+
+# Note: ensure our possibly updated `PATH` variable is picked up by
+# `$(shell …)` invocations when using older (<4.4) make versions.
+ifeq (,$(filter shell-export,$(.FEATURES)))
+  SHELL = env PATH='$(PATH)' bash -eo pipefail
+else
+  SHELL = bash -eo pipefail
+endif
+
+ifeq (,$(V)$(VERBOSE))
+.SILENT:
+endif
+
+ifeq (,$(PARALLEL_JOBS))
+empty :=
+space := $(empty) $(empty)
+  PARALLEL_JOBS := $(or $(patsubst -j%,%,$(filter -j%,$(MFLAGS))))
+endif
+ifeq (,$(PARALLEL_LOAD))
+  PARALLEL_LOAD := $(or $(patsubst -l%,%,$(filter -l%,$(MFLAGS))))
+endif
+ifeq (,$(and $(PARALLEL_JOBS),$(PARALLEL_LOAD)))
+  CORES := $(shell getconf _NPROCESSORS_ONLN)
+  ALLOCATED_CORES := $(CORES)
+  # Detect when running under cgroups, so we don't try
+  # to run with `make/ninja -j36 …` on some CI workers.
+  ifneq (,$(wildcard /sys/fs/cgroup/cpu/cpu.shares))
+    ALLOCATED_CORES := $(shell echo $$(($$(cat /sys/fs/cgroup/cpu/cpu.shares) / 1024)))
+  endif
+  ifeq (,$(PARALLEL_JOBS))
+    PARALLEL_JOBS := $(if $(CI),$(shell echo $$(($(ALLOCATED_CORES) + ($(ALLOCATED_CORES) + 1) / 2))),$(ALLOCATED_CORES))
+  endif
+  ifeq (,$(PARALLEL_LOAD))
+    PARALLEL_LOAD := $(CORES)
+  endif
+endif
+export PARALLEL_JOBS
+export PARALLEL_LOAD
+
+KEEP_GOING := $(findstring k,$(firstword -$(MAKEFLAGS)))
+DRY_RUN := $(findstring n,$(firstword -$(MAKEFLAGS)))
 
 # Use ccache in build system by default. Define USE_NO_CCACHE=1 to force disable it.
 ifeq ($(USE_NO_CCACHE), 1)
-	CCACHE:=
+  CCACHE :=
 else
-	CCACHE?=$(shell command -v ccache)
+  CCACHE := $(or $(CCACHE),$(shell command -v ccache))
 endif
 
-UNAME:=$(shell uname -s)
 
-# use MAKEFILE_DIR instead of CURDIR for variables that are exported through -include
-MAKEFILE_DIR=$(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-TOOLCHAIN_DIR=$(MAKEFILE_DIR)toolchain
-# Android API level 14 is the minimum target for NDK 15
-ANDROID_ARCH?=arm
-ANDROID_TOOLCHAIN=$(TOOLCHAIN_DIR)/android-toolchain-$(ANDROID_ARCH)
-NDK?=$(TOOLCHAIN_DIR)/android-ndk-r15c
-NDKABI?=14
+TOOLCHAIN_DIR = $(abspath $(KOR_BASE)/toolchain)
+ANDROID_ARCH ?= arm
+export ANDROID_HOME := $(or $(ANDROID_HOME),$(ANDROID_SDK_ROOT),$(TOOLCHAIN_DIR)/android-sdk-linux)
+export ANDROID_SDK_ROOT := $(ANDROID_HOME)
+export ANDROID_NDK_HOME := $(or $(ANDROID_NDK_HOME),$(ANDROID_NDK_ROOT),$(TOOLCHAIN_DIR)/android-ndk-r23c)
+export ANDROID_NDK_ROOT := $(ANDROID_NDK_HOME)
+ANDROID_TOOLCHAIN = $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64
+ifeq ($(ANDROID_ARCH), arm64)
+	# 64bit arches require at least ABI 21.
+	export NDKABI?=21
+else ifeq ($(ANDROID_ARCH), x86_64)
+	# Ditto.
+	export NDKABI?=21
+else
+	# Android 4.3 (Jelly Bean MR2); our minimal supported version.
+	export NDKABI?=18
+endif
 
-# Detect LuaRocks 3
-LR_VER_NUM := $(shell luarocks --version | grep -o [0-9].[0-9])
-LR_GT_3_0 := $(shell awk -v LR_VER_NUM=$(LR_VER_NUM) 'BEGIN { print (LR_VER_NUM >= 3.0); }')
-
-# Some CMake flags
-CMAKE_BUILD_TYPE?=Release
+LINUX_ARCH?=native
 
 # set debug-related variables to cascade down
 ifdef KODEBUG
 	DEBUG:=$(KODEBUG)
 	export DEBUG
-	# will have to be passed as -DCMAKE_BUILD_TYPE to $(CMAKE) invocations
-	CMAKE_BUILD_TYPE:=Debug
 endif
 
-export CMAKE_BUILD_TYPE
+CMAKE := cmake -Wdev --warn-uninitialized
+NINJA := $(or $(NINJA),ninja)
 
-# CMAKE:=cmake --no-warn-unused-cli
-CMAKE := cmake
-ifdef VERBOSE
-	CMAKE_ARGS := -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON
+ifneq (,$(or $(VERBOSE),$(V)))
+  ifeq (4.4,$(firstword $(sort $(MAKE_VERSION) 4.4)))
+    MAKEFLAGS += --debug=print
+  else
+    MAKEFLAGS += --trace
+  endif
+  NINJAFLAGS += -v
+  export KOVERBOSE=1
 endif
-CMAKE+=$(CMAKE_ARGS)
-
-NINJA := $(shell command -v ninja)
-
-ifneq ($(NINJA),)
-	ifeq ($(USE_MAKE),)
-		USE_NINJA := 1
-	endif
+ifneq (,$(PARALLEL_JOBS))
+  NINJAFLAGS += -j$(PARALLEL_JOBS)
+endif
+ifneq (,$(PARALLEL_LOAD))
+  NINJAFLAGS += -l$(PARALLEL_LOAD)
+endif
+ifneq (,$(KEEP_GOING))
+  MAKEFLAGS += -k
+  NINJAFLAGS += -k0
+endif
+ifneq (,$(DRY_RUN))
+  MAKEFLAGS += -n
+  NINJAFLAGS += -nv
 endif
 
-ifneq ($(USE_NINJA),)
-	CMAKE_FLAGS := -G Ninja
-	CMAKE_MAKE_PROGRAM := $(NINJA)
-	ifdef VERBOSE
-		NINJA_FLAGS := -v
-	endif
-	CMAKE_MAKE_PROGRAM_FLAGS ?= $(NINJA_FLAGS)
+ifneq ($(or $(CLICOLOR_FORCE),$(MAKE_TERMOUT)),)
+  export CLICOLOR_FORCE=1
+  NINJA_STATUS := $(shell printf '\33[32;1m▸%%p\33[0m | ')
 else
-	CMAKE_MAKE_PROGRAM := $(MAKE)
-	ifdef VERBOSE
-		MAKE_FLAGS := VERBOSE=1
-	endif
-	CMAKE_MAKE_PROGRAM_FLAGS ?= $(MAKE_FLAGS)
+  NINJA_STATUS := $(empty) %p | $(empty)
 endif
+export NINJA_STATUS
+export NINJAFLAGS
 
-$(info ************ CMAKE_MAKE_PROGRAM: "$(CMAKE_MAKE_PROGRAM)" **********)
+CMAKE_FLAGS = -G Ninja
 
 # set this to your ARM cross compiler:
 # set CC CXX AR LD RANLIB
 ifeq ($(TARGET), arm-generic)
 	CHOST?=arm-linux-gnueabi
 else ifeq ($(TARGET), kindle)
-	export KINDLE=1
+	KINDLE=1
 	HAS_KINDLE5_TC:=$(shell command -v arm-kindle5-linux-gnueabi-gcc 2> /dev/null)
 	ifdef HAS_KINDLE5_TC
 		#Use the custom build TC
@@ -81,99 +132,147 @@ else ifeq ($(TARGET), kindle)
 		#Use the generic linaro TC for debugging
 		CHOST?=arm-linux-gnueabi
 	endif
+	GLIBC_VERSION_MAX = 2.12
 else ifeq ($(TARGET), kindlepw2)
-	export KINDLE=1
+	KINDLE=1
 	HAS_KINDLEPW2_TC:=$(shell command -v arm-kindlepw2-linux-gnueabi-gcc 2> /dev/null)
 	ifdef HAS_KINDLEPW2_TC
 		CHOST?=arm-kindlepw2-linux-gnueabi
 	else
 		CHOST?=arm-linux-gnueabi
 	endif
+	GLIBC_VERSION_MAX = 2.12
+else ifeq ($(TARGET), kindlehf)
+	KINDLE=1
+	HAS_KINDLEHF_TC:=$(shell command -v arm-kindlehf-linux-gnueabihf-gcc 2> /dev/null)
+	ifdef HAS_KINDLEHF_TC
+		CHOST?=arm-kindlehf-linux-gnueabihf
+	else
+		CHOST?=arm-linux-gnueabihf
+	endif
+	GLIBC_VERSION_MAX = 2.20
 else ifeq ($(TARGET), kindle-legacy)
-	export KINDLE=1
+	KINDLE=1
 	CHOST?=arm-kindle-linux-gnueabi
-	export LEGACY=1
+	LEGACY=1
+	GLIBC_VERSION_MAX = 2.5
 else ifeq ($(TARGET), kobo)
-	export KOBO=1
+	KOBO=1
 	HAS_KOBO_TC:=$(shell command -v arm-kobo-linux-gnueabihf-gcc 2> /dev/null)
 	ifdef HAS_KOBO_TC
 		CHOST?=arm-kobo-linux-gnueabihf
 	else
 		CHOST?=arm-linux-gnueabihf
 	endif
-	export USE_LJ_WPACLIENT=1
+	USE_LJ_WPACLIENT=1
+	GLIBC_VERSION_MAX = 2.15
+else ifeq ($(TARGET), kobov4)
+	KOBO=1
+	HAS_KOBOV4_TC:=$(shell command -v arm-kobov4-linux-gnueabihf-gcc 2> /dev/null)
+	ifdef HAS_KOBOV4_TC
+		CHOST?=arm-kobov4-linux-gnueabihf
+	else
+		CHOST?=arm-linux-gnueabihf
+	endif
+	USE_LJ_WPACLIENT=1
+	GLIBC_VERSION_MAX = 2.19
+else ifeq ($(TARGET), kobov5)
+	KOBO=1
+	HAS_KOBOV5_TC:=$(shell command -v arm-kobov5-linux-gnueabihf-gcc 2> /dev/null)
+	ifdef HAS_KOBOV5_TC
+		CHOST?=arm-kobov5-linux-gnueabihf
+	else
+		CHOST?=arm-linux-gnueabihf
+	endif
+	USE_LJ_WPACLIENT=1
+	GLIBC_VERSION_MAX = 2.35
 else ifeq ($(TARGET), ubuntu-touch)
 	CHOST?=arm-linux-gnueabihf
-	export SDL=1
-	export UBUNTUTOUCH=1
+	SDL=1
+	UBUNTUTOUCH=1
 else ifeq ($(TARGET), appimage)
-	export EMULATE_READER=1
-	export SDL=1
-	export APPIMAGE=1
-else ifeq ($(TARGET), debian)
-	export SDL=1
-	export DEBIAN=1
-	export EMULATE_READER=1
-else ifeq ($(TARGET), debian-armel)
-	CHOST?=arm-linux-gnueabi
-	export SDL=1
-	export DEBIAN_CROSS=1
-else ifeq ($(TARGET), debian-armhf)
-	CHOST?=arm-linux-gnueabihf
-	export SDL=1
-	export DEBIAN_CROSS=1
-else ifeq ($(TARGET), android)
-	export ANDROID=1
-	export PATH:=$(ANDROID_TOOLCHAIN)/bin:$(PATH)
-	export SYSROOT=$(NDK)/platforms/android-$(NDKABI)/arch-$(ANDROID_ARCH)
-	ifeq ($(ANDROID_ARCH), x86)
-		CHOST?=i686-linux-android
+	EMULATE_READER=1
+	SDL=1
+	APPIMAGE=1
+else ifeq ($(TARGET), linux)
+	SDL=1
+	ifeq ($(LINUX_ARCH), arm)
+		CHOST?=arm-linux-gnueabihf
+	else ifeq ($(LINUX_ARCH), arm64)
+		CHOST?=aarch64-linux-gnu
 	else
-		CHOST?=arm-linux-androideabi
+		EMULATE_READER=1
 	endif
-	# Needed for OpenSSL, c.f., NOTES.ANDROID
-	export ANDROID_NDK_HOME=$(ANDROID_TOOLCHAIN)
+else ifeq ($(TARGET), macos)
+	SDL=1
+	MACOS=1
+	EMULATE_READER=1
+else ifeq ($(TARGET), android)
+	ANDROID=1
+	export PATH:=$(ANDROID_TOOLCHAIN)/bin:$(PATH)
+	ifeq ($(ANDROID_ARCH), x86)
+		CHOST?=i686-linux-android$(NDKABI)
+	else ifeq ($(ANDROID_ARCH), x86_64)
+		CHOST?=x86_64-linux-android$(NDKABI)
+	else ifeq ($(ANDROID_ARCH), arm64)
+		CHOST?=aarch64-linux-android$(NDKABI)
+	else
+		CHOST?=armv7a-linux-androideabi$(NDKABI)
+	endif
+	USE_CLANG=1
 else ifeq ($(TARGET), win32)
-	CHOST?=i686-w64-mingw32
-	export WIN32=1
-	export SDL=1
+	CHOST?=x86_64-w64-mingw32
+	WIN32=1
+	SDL=1
 else ifeq ($(TARGET), pocketbook)
 	CHOST?=arm-pocketbook-linux-gnueabi
-	export POCKETBOOK=1
+	POCKETBOOK=1
 	HAS_POCKETBOOK_TC:=$(shell command -v arm-pocketbook-linux-gnueabi-gcc 2> /dev/null)
 	ifdef HAS_POCKETBOOK_TC
 		CHOST?=arm-pocketbook-linux-gnueabi
 	else
 		CHOST?=arm-linux-gnueabi
 	endif
+	GLIBC_VERSION_MAX = 2.5
 else ifeq ($(TARGET), remarkable)
 	CHOST?=arm-remarkable-linux-gnueabihf
-	export REMARKABLE=1
+	REMARKABLE=1
+	USE_LJ_WPACLIENT=1
+else ifeq ($(TARGET), remarkable-aarch64)
+	CHOST?=aarch64-remarkable-linux-gnu
+	REMARKABLE=1
+	USE_LJ_WPACLIENT=1
 else ifeq ($(TARGET), sony-prstux)
 	CHOST?=arm-linux-gnueabihf
-	export SONY_PRSTUX=1
-	export USE_LJ_WPACLIENT=1
+	SONY_PRSTUX=1
+	USE_LJ_WPACLIENT=1
 else ifeq ($(TARGET), cervantes)
-	export CERVANTES=1
+	CERVANTES=1
 	HAS_CERVANTES_TC:=$(shell command -v arm-cervantes-linux-gnueabi-gcc 2> /dev/null)
 	ifdef HAS_CERVANTES_TC
 		CHOST?=arm-cervantes-linux-gnueabi
 	else
 		CHOST?=arm-linux-gnueabi
 	endif
-	export USE_LJ_WPACLIENT=1
+	USE_LJ_WPACLIENT=1
 else ifndef TARGET
 	# if TARGET is not defined we will build an emulator on current machine
-	export EMULATE_READER=1
-	export SDL=1
+	EMULATE_READER=1
+	SDL=1
 else
-	$(error Invalid TARGET: "$(TARGET)")
+  $(error Invalid TARGET: "$(TARGET)")
 endif
 
-ifneq (,$(filter $(UNAME), Darwin))
-	export DARWINHOST=1
+ifneq (,$(findstring darwin,$(MAKE_HOST)))
+	DARWINHOST=1
+	ifneq (,$(findstring aarch64,$(MAKE_HOST)))
+		DARWIN_AARCH64_HOST=1
+	endif
 	ifdef EMULATE_READER
-		export DARWIN=1
+		DARWIN=1
+		ifdef DARWIN_AARCH64_HOST
+			DARWIN_AARCH64=1
+		endif
 	endif
 endif
 
@@ -184,27 +283,33 @@ ifdef DARWINHOST
 	endif
 endif
 
-USE_LUAJIT_LIB=$(or $(DARWIN),$(ANDROID),$(WIN32))
-
-SKIP_LUAJIT_BIN=$(or $(ANDROID),)
-
-# handle utility params on different host systems
-ifdef DARWINHOST
-	RCP:=cp -R
-	ISED:=sed -i '' -e
-else
-	RCP:=cp -r
-	ISED:=sed -i -e
+ifneq ($(CCACHE),)
+  export CCACHE
+  # Rewrite relative paths in the compiler’s
+  # standard error output to absolute paths.
+  export CCACHE_ABSSTDERR = 1
 endif
 
-# unknown device
-ifdef SBOX_UNAME_MACHINE
-	CC:=gcc
-	CXX:=g++
-endif
+# NOTE: This is necessary (at least on Android), because some early API levels will not put DT_NEEDED libraries in the global namespace.
+#       Ensuring Lua/C modules have their own DT_NEEDED entry to the shared LuaJIT library works around this quirk (and is otherwise mostly harmless).
+#       Saner APIs behave like Linux, and wouldn't require this hack.
+USE_LUAJIT_LIB = $(or $(DARWIN),$(ANDROID),$(WIN32))
+SKIP_LUAJIT_BIN = $(ANDROID)
+
+RCP := cp -R
+WGET ?= wget --no-verbose
+
+define wget_and_validate
+	$(WGET) -O '$1' '$2' \
+	&& echo '$3 $1' | sha1sum -c - \
+	|| { code=$$?; rm -f '$1'; exit $$code; }
+endef
+
+# ln --symbolic --no-dereference --force --relative
+SYMLINK = $(if $(DARWINHOST),gln,ln) -snfr
 
 # set cross-compiler/host CC and CXX
-ifneq (,$(findstring clang, $(CC)))
+ifneq (,$(USE_CLANG))
 	ifdef CHOST
 		CC:=$(CHOST)-clang
 		CXX:=$(CHOST)-clang++
@@ -228,8 +333,6 @@ ifneq (,$(findstring clang, $(CC)))
 	QFLAGS+=-Wno-parentheses-equality
 	# For dropbear's libtom...
 	QFLAGS+=-Wno-macro-redefined
-	# Note that things appear to be better with Clang >= 6 ;).
-	export CLANG=1
 else
 	ifdef CHOST
 		CC:=$(CHOST)-gcc
@@ -244,55 +347,57 @@ else
 endif
 
 # set cross-compiler/host AR LD RANLIB
-ifdef CHOST
+ifeq ($(TARGET), android)
+	STRIP:=llvm-strip
+	AR:=llvm-ar
+	LD:=ld
+	NM:=llvm-nm
+	OBJCOPY:=llvm-objcopy
+	RANLIB:=llvm-ranlib
+	READELF:=llvm-readelf
+else ifdef CHOST
 	STRIP:=$(CHOST)-strip
 	AR:=$(CHOST)-ar
 	LD:=$(CHOST)-ld
+	NM:=$(CHOST)-nm
+	OBJCOPY:=$(CHOST)-objcopy
 	RC:=$(CHOST)-windres
 	RANLIB:=$(CHOST)-ranlib
+	READELF:=$(CHOST)-readelf
 else
 	STRIP:=strip
 	AR:=ar
 	LD:=ld
+	NM:=nm
+	OBJCOPY:=objcopy
 	RC:=windres
 	RANLIB:=ranlib
+	READELF:=readelf
 endif
 
 HOSTSTRIP:=strip
 HOSTAR:=ar
 HOSTLD:=ld
+HOSTOBJCOPY:=objcopy
 HOSTRANLIB:=ranlib
-LIBTOOL:=$(if $(DARWIN),glibtool,libtool)
-LIBTOOLIZE:=$(if $(DARWIN),glibtoolize,libtoolize)
-
-# Static libstdc++, because libtool filters flags at link-time, and drops -static-libstdc++ on GNU/Linux...
-# NOTE: We default to libtool's preferred workaround of putting those extra flags we really want to keep in CC/CXX
-# But to add insult to injury, libtool also links with -nostdlib, which renders -static-lib* useless, so we
-# need this ugly workaround, even on recent (>= 4.5) GCC versions where any sane person would imagine -static-libstdc++ to be enough...
-ifndef DARWIN
-	# we need to set PATH manually here because export PATH in gmake only takes
-	# effect for for sub shells
-	STATIC_LIBSTDCPP=$(shell PATH='$(PATH)' $(CC) -print-file-name=libstdc++.a)
-else
-	STATIC_LIBSTDCPP=
-endif
+HOSTREADELF:=readelf
 
 # Base CFLAGS, without arch. We'll need it for luajit, because its
 # Makefiles do some tricky stuff to differentiate HOST/TARGET
-BASE_CFLAGS:=-O2 -ffast-math -pipe -fomit-frame-pointer
+BASE_CFLAGS:=-O2 -g -pipe -fomit-frame-pointer
 # For ricers.
-#BASE_CFLAGS:=-O3 -ffast-math -pipe -fomit-frame-pointer -frename-registers -fweb
+#BASE_CFLAGS:=-O3 -pipe -fomit-frame-pointer -frename-registers -fweb
 # Used to enforce aggressive optimizations in some components
-VECTO_CFLAGS:=-O3 -ffast-math -pipe -fomit-frame-pointer -frename-registers -fweb -ftree-vectorize -funroll-loops
+VECTO_CFLAGS:=-O3 -pipe -fomit-frame-pointer -frename-registers -fweb -ftree-vectorize -funroll-loops
 # And for an aggressive LTO build
-#BASE_CFLAGS:=$(VECTO_CFLAGS) -flto=8 -fuse-linker-plugin
+#BASE_CFLAGS:=$(VECTO_CFLAGS) -flto$(if $(PARALLEL_JOBS),=$(PARALLEL_JOBS)) -fuse-linker-plugin
 # Use this for debugging:
 ifdef KODEBUG
 	BASE_CFLAGS:=-Og -g -pipe -fno-omit-frame-pointer
-	# Prevent runaway buildsystems from screwing with us and stripping stuff behind our backs...
-	STRIP:=true
 	# Don't enforce extra CFLAGS in debug builds
 	VECTO_CFLAGS:=
+else
+  BASE_CFLAGS += -DNDEBUG
 endif
 
 # Misc GCC tricks to ensure backward compatibility with the K2,
@@ -333,18 +438,38 @@ ARMV6_1136_ARCH:=-march=armv6j -mtune=arm1136jf-s -mfpu=vfp -marm
 ARMV6_GENERIC_ARCH:=-march=armv6 -mtune=generic-armv6 -marm
 # Generic armv7
 ARMV7_GENERIC_ARCH:=-march=armv7-a -mtune=generic-armv7-a -mfpu=vfpv3 -mthumb
+# Generic arm 64 bits
+ARM64_GENERIC_ARCH:=-march=armv8-a
 # Cortex A8 (K4, Kindle Touch, PW1, Kobos since the Touch)
 ARMV7_A8_ARCH:=-march=armv7-a -mtune=cortex-a8 -mfpu=neon -mthumb
-# Cortex A9 (Kindle PW2)
+# Cortex A9 (e.g., Kindle PW2)
 ARMV7_A9_ARCH:=-march=armv7-a -mtune=cortex-a9 -mfpu=neon -mthumb
-# Android.
-ANDROID_COMPAT_CFLAGS:=--sysroot $(SYSROOT)
-ANDROID_COMPAT_CXXFLAGS:=--sysroot $(SYSROOT)
+# Cortex A7 (e.g., Kobo Sage & Elipsa)
+ARMV7_A7_ARCH:=-march=armv7-a -mtune=cortex-a7 -mfpu=neon -mthumb
+# Cortex A53 (MTK SoCs on an armv7 software stack)
+ARMV7_A53_ARCH:=-march=armv7-a -mtune=cortex-a53 -mfpu=neon -mthumb
+# Cortex A53 (reMarkable Paper Pro)
+ARM64_A53_ARCH:=-march=armv8-a+crc+crypto -mtune=cortex-a53
 # Mirror the NDK's armeabi-v7a APP_ABI (cf. #201)
 ifeq ($(ANDROID_ARCH), arm)
 	ANDROID_ARM_ARCH:=-march=armv7-a -mfpu=vfpv3-d16
 	ANDROID_ARM_ARCH+=-mthumb
+	# NOTE: NDK15c actually uses -fstack-protector-strong
 	ANDROID_ARM_ARCH+=-ffunction-sections -funwind-tables -fstack-protector -no-canonical-prefixes
+else ifeq ($(ANDROID_ARCH), arm64)
+	ANDROID_ARM_ARCH:=-ffunction-sections -funwind-tables -fstack-protector -no-canonical-prefixes
+endif
+
+TARGET_MACHINE := $(shell $(CC) -dumpmachine)
+ifeq (,$(TARGET_MACHINE))
+  ifneq (,$(filter-out distclean fetch%,$(or $(MAKECMDGOALS),all)))
+    $(error failed to retrieve target machine)
+  endif
+endif
+ifdef KODEBUG
+  MACHINE = $(TARGET_MACHINE)-debug
+else
+  MACHINE = $(TARGET_MACHINE)
 endif
 
 # Use target-specific CFLAGS
@@ -352,7 +477,21 @@ ifeq ($(TARGET), kobo)
 	# NOTE: If we only care about Kobos w/ a Touch screen, we're good.
 	ARM_ARCH:=$(ARMV7_A8_ARCH)
 	ARM_ARCH+=-mfloat-abi=hard
-	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabihf)
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabihf)
+		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+	endif
+else ifeq ($(TARGET), kobov4)
+	ARM_ARCH:=$(ARMV7_A9_ARCH)
+	ARM_ARCH+=-mfloat-abi=hard
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabihf)
+		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+	endif
+else ifeq ($(TARGET), kobov5)
+	ARM_ARCH:=$(ARMV7_A53_ARCH)
+	ARM_ARCH+=-mfloat-abi=hard
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabihf)
 		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 	endif
@@ -370,56 +509,71 @@ else ifeq ($(TARGET), pocketbook)
 	#       so, ideally, we shouldn't be using this on those newer devices...
 	COMPAT_CFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
 	COMPAT_CXXFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
-	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabi)
 		COMPAT_CFLAGS+=$(UBUNTU_COMPAT_CFLAGS)
 		COMPAT_CXXFLAGS+=$(UBUNTU_COMPAT_CFLAGS)
 	endif
 else ifeq ($(TARGET), kindle)
 	ARM_ARCH:=$(ARMV7_A8_ARCH)
 	ARM_ARCH+=-mfloat-abi=softfp
-	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabi)
 		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 	endif
 else ifeq ($(TARGET), kindlepw2)
 	ARM_ARCH:=$(ARMV7_A9_ARCH)
 	ARM_ARCH+=-mfloat-abi=softfp
-	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabi)
+		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
+	endif
+else ifeq ($(TARGET), kindlehf)
+	# While we *would* like to bias towards in-order CPUs (e.g., A7/A53), we can't because we have to support the PW4,
+	# which runs on an A9, and that's VFPv3, and not VFPv4 (and that seems to matter, despite us technically always prefering NEON).
+	ARM_ARCH:=$(ARMV7_A9_ARCH)
+	ARM_ARCH+=-mfloat-abi=hard
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabihf)
 		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 	endif
 else ifeq ($(TARGET), kindle-legacy)
 	ARM_ARCH:=$(ARMV6_1136_ARCH)
 	ARM_ARCH+=-mfloat-abi=softfp
-	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabi)
 		COMPAT_CFLAGS:=$(MG2K12_COMPAT_CFLAGS)
 		COMPAT_CXXFLAGS:=$(MG2K12_COMPAT_CXXFLAGS)
 	endif
 	COMPAT_CFLAGS:=$(NILUJE_COMPAT_CFLAGS)
-	# Avoid pulling stuff from GLIBC_2.7 & 2.9 in glib
-	export glib_cv_eventfd=no
-	export ac_cv_func_pipe2=no
-	# Avoid pulling stuff from GLIBC_2.6 in tar
-	export ac_cv_func_utimensat=no
-	export ac_cv_func_futimens=no
+	# Works around potential deadlocks with local statics in LunaSVG (cxa_guard -> futex)
+	# We're not multi-threaded, so, whatever.
+	# c.f., https://github.com/koreader/koreader/discussions/11246
+        COMPAT_CXXFLAGS+=-fno-threadsafe-statics
 else ifeq ($(TARGET), android)
-	COMPAT_CFLAGS:=$(ANDROID_COMPAT_CFLAGS)
-	COMPAT_CXXFLAGS:=$(ANDROID_COMPAT_CXXFLAGS)
 	ifeq ($(ANDROID_ARCH), arm)
 		ARM_ARCH:=$(ANDROID_ARM_ARCH)
 		ARM_ARCH+=-mfloat-abi=softfp
-		export ac_cv_type_in_port_t=yes
+	else ifeq ($(ANDROID_ARCH), arm64)
+		ARM_ARCH:=$(ANDROID_ARM_ARCH)
+	else ifeq ($(ANDROID_ARCH), x86)
+	endif
+	ifneq (,$(filter arm x86,$(ANDROID_ARCH)))
+		# NOTE: to be removed when upgrading the minimal supported API level to 24.
+		# (https://android.googlesource.com/platform/bionic/+/master/docs/32-bit-abi.md)
+		export ac_cv_sys_file_offset_bits=32
+		COMPAT_CFLAGS += -U_FILE_OFFSET_BITS -D_FILE_OFFSET_BITS=32
 	endif
 else ifeq ($(TARGET), remarkable)
 	ARM_ARCH:=$(ARMV7_A9_ARCH)
 	ARM_ARCH+=-mfloat-abi=hard
+else ifeq ($(TARGET), remarkable-aarch64)
+	ARM_ARCH:=$(ARM64_A53_ARCH)
 else ifeq ($(TARGET), sony-prstux)
 	ARM_ARCH:=$(ARMV7_A8_ARCH)
 	ARM_ARCH+=-mfloat-abi=hard
 else ifeq ($(TARGET), cervantes)
 	ARM_ARCH:=$(ARMV7_GENERIC_ARCH)
 	ARM_ARCH+=-mfloat-abi=softfp
-	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
+	ifeq ($(TARGET_MACHINE), arm-linux-gnueabi)
 		COMPAT_CFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 	endif
@@ -427,12 +581,13 @@ else ifeq ($(TARGET), arm-generic)
 	# Defaults to generic crap
 	ARM_ARCH:=$(ARMV6_GENERIC_ARCH)
 	ARM_ARCH+=-mfloat-abi=softfp
-else ifeq ($(TARGET), debian-armel)
-	ARM_ARCH:=$(ARMV7_GENERIC_ARCH)
-	ARM_ARCH+=-mfloat-abi=softfp
-else ifeq ($(TARGET), debian-armhf)
-	ARM_ARCH:=$(ARMV7_GENERIC_ARCH)
-	ARM_ARCH+=-mfloat-abi=hard
+else ifeq ($(TARGET), linux)
+	ifeq ($(LINUX_ARCH), arm)
+		ARM_ARCH:=$(ARMV7_GENERIC_ARCH)
+		ARM_ARCH+=-mfloat-abi=hard
+	else ifeq ($(LINUX_ARCH), arm64)
+		ARM_ARCH:=$(ARM64_GENERIC_ARCH)
+	endif
 else
 	# else, we are compiling emulator on x86
 	ARM_ARCH:=
@@ -444,37 +599,32 @@ ifdef APPIMAGE
 	HOST_ARCH:=-mtune=generic -march=x86-64
 endif
 
-ifdef DEBIAN
+ifeq ($(TARGET), linux)
 	HOST_ARCH:=-mtune=generic
 endif
 
-# Anything below GCC 6 gets to be forcefully switched to decent standards, because some of our deps require C11 & C++11 support.
-# NOTE: Technically, this also means we require Clang >= 3.2, but that should more or less hold true on our end, because that's truly ancient.
-# Tests heavily inspired from Linux's build system ;).
-CC_IS_CLANG:=$(shell PATH='$(PATH)' $(CC) -v 2>&1 | grep -q "clang version" && echo 1 || echo 0)
-CC_VERSION:=$(shell PATH='$(PATH)' printf "%02d%02d%02d" `echo __GNUC__ | $(CC) -E -x c - | tail -n 1` `echo __GNUC_MINOR__ | $(CC) -E -x c - | tail -n 1` `echo __GNUC_PATCHLEVEL__ | $(CC) -E -x c - | tail -n 1`)
-# Detect Clang's SA, too...
-ifeq "$(CC_IS_CLANG)" "0"
-	ifeq "$(lastword $(subst /, ,$(CC)))" "ccc-analyzer"
-		CC_IS_CLANG:=1
-	endif
+ifdef MACOS
+	HOST_ARCH:=-mtune=generic
 endif
-ifeq "$(CC_IS_CLANG)" "0"
-	# NOTE: GCC 6.1.0 switched to gnu11 & gnu++14, so only tweak older ones.
-	#       c.f., https://stackoverflow.com/q/14737104 for a nice recap.
-	ifeq "$(shell expr $(CC_VERSION) \< 060100)" "1"
-		CSTD_FLAGS:=-std=gnu11
-		CXXSTD_FLAGS:=-std=gnu++11
-	endif
-else
-	# NOTE: Enforce the current default everywhere, otherwise XCode does stupid things on Darwin.
-	#       c.f., https://clang.llvm.org/docs/CommandGuide/clang.html#language-selection-and-mode-options
-	#          &  https://github.com/llvm/llvm-project/blob/1c4b5a8dfed853ca8cbee98f274ff0a173186586/clang/lib/Frontend/CompilerInvocation.cpp#L2136-L2164
-	#       FWIW, the C++ move to gnu++14 by default dates back to Clang 6:
-	#       c.f., https://github.com/llvm-mirror/clang/commit/466d8da5f89b1a780f735c86f414fa69ce63221b
-	CSTD_FLAGS:=-std=gnu11
-	CXXSTD_FLAGS:=-std=gnu++14
+
+ifdef DARWIN_AARCH64_HOST
+# At the moment of writing, apple-m1 is the lowest common denominator for Apple silicon chips. Should work for M2 as well
+	HOST_ARCH:=-mcpu=apple-m1
 endif
+
+# Some of our deps require C11 & C++17 (`if constexpr (…)`) support.
+# NOTE: Technically, this also means we require GCC >= 7.1 (2017) or Clang >= 5.0.0 (2017),
+hashsign := \#
+hasminstd = $(shell printf '%s\n' '$(hashsign)if $3 >= $4L' 'yes' '$(hashsign)else' 'no' '$(hashsign)endif' '$3' | $1 -x $2 -P -E -)
+ifneq (yes,$(firstword $(call hasminstd,$(CC),c,__STDC_VERSION__,201100)))
+	CSTD_FLAGS := -std=gnu11
+endif
+ifneq (yes,$(firstword $(call hasminstd,$(CXX),c++,__cplusplus,201700)))
+	CXXSTD_FLAGS := -std=gnu++17
+endif
+
+# Improve reproducibility.
+BASE_CFLAGS += -ffile-prefix-map=$(abspath $(KOR_BASE))/=
 
 HOSTCFLAGS:=$(HOST_ARCH) $(BASE_CFLAGS) $(QFLAGS)
 
@@ -482,16 +632,28 @@ CFLAGS:=$(BASE_CFLAGS) $(QFLAGS) $(CSTD_FLAGS)
 CXXFLAGS:=$(BASE_CFLAGS) $(QFLAGS) $(CXXSTD_FLAGS)
 
 ifndef DARWIN
-	LDFLAGS:=-Wl,-O1 -Wl,--as-needed -static-libstdc++
+  LDFLAGS := -Wl,-O1 -Wl,--as-needed $(COMPAT_LDFLAGS)
+  # To prefer our shipped libraries over the system's,
+  # we set a couple rpath via an include file to make sure it goes through buildsystem indirection unscathed...
+  # NOTE: We enforce DT_RPATH over DT_RUNPATH because DT_RUNPATH is *not* honored for *transitive* dependencies,
+  #       which can lead to hilarious catastrophe if such a dependency pulls a SONAME identical to something we ship,
+  #       because it will *not* load ours, but still let ours be loaded after that...
+  #       (Assuming no LD_LIBRARY_PATH are set, since the search order is basically RPATH -> LD_LIBRARY_PATH -> RUNPATH).
+  #       c.f., https://github.com/koreader/koreader-base/pull/1638#issuecomment-1636725691
+  #       And https://bugs.launchpad.net/ubuntu/+source/eglibc/+bug/1253638/comments/5 for a nice recap.
+  ifneq ($(TARGET), android)
+    LDFLAGS += -Wl,@$(abspath $(KOR_BASE)/origin.ldflags)
+  endif
 else
-	LDFLAGS:=
+  LDFLAGS := -Wl,-rpath,@executable_path/libs,-rpath,@executable_path/../koreader/libs
 endif
 
 # NOTE: Follow the NDK's lead
 ifeq ($(TARGET), android)
-	LDFLAGS+=-no-canonical-prefixes -Wl,--fix-cortex-a8
+	LDFLAGS+=-no-canonical-prefixes
 	ifeq ($(ANDROID_ARCH), arm)
-		LDFLAGS+=-march=armv7-a
+		# FIXME: `--Wl,--fix-cortex-a8` still needed?
+		LDFLAGS+=-Wl,--fix-cortex-a8 -march=armv7-a
 	endif
 endif
 
@@ -499,37 +661,19 @@ ifeq ($(TARGET), win32)
 	LDFLAGS+=-Wl,--allow-multiple-definition -static-libgcc
 endif
 
-# in case the libstdc++ is to be linked statically, the location of the static
-# library can be specified in the STATICLIBSTDCPP variable.
-# the default is to link a shared library:
-DYNAMICLIBSTDCPP:=-lstdc++
-ifdef STATICLIBSTDCPP
-	DYNAMICLIBSTDCPP:=
-endif
-
 # this will create a path named build/arm-none-linux-gnueabi or similar
-TARGET_MARCHINE:=$(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null)
-ifdef KODEBUG
-	MACHINE=$(TARGET_MARCHINE)-debug
-else
-	MACHINE=$(TARGET_MARCHINE)
-endif
-OUTPUT_DIR=build/$(MACHINE)
-# We'll want a machine-specific staging directory *outside* of OUTPUT_DIR, so we don't pickup random build artifacts in packages...
-CMAKE_STAGING_DIR=build/staging-$(MACHINE)
+OUTPUT_DIR ?= $(KOR_BASE)/build/$(MACHINE)
+CMAKE_DIR = $(OUTPUT_DIR)/cmake
+STAGING_DIR = $(OUTPUT_DIR)/staging
+SPEC_ROCKS_DIR = $(OUTPUT_DIR)/spec/rocks
+
+BUILD_ENTRYPOINT = $(CMAKE_DIR)/build.ninja
 
 # you can configure an emulation for the (eink) framebuffer here.
 # the application won't use the framebuffer (and the special e-ink ioctls)
 # in that case.
 
 ifdef EMULATE_READER
-	# CMake is difficult about CC and CXX, especially when it's not just a full path
-	CMAKE_C_COMPILER:=$(shell command -v $(strip $(HOSTCC)))
-	CMAKE_CXX_COMPILER:=$(shell command -v $(strip $(HOSTCXX)))
-	ifdef CCACHE
-		CMAKE_C_COMPILER_LAUNCHER:=$(CCACHE)
-		CMAKE_CXX_COMPILER_LAUNCHER:=$(CCACHE)
-	endif
 	# Regular
 	REALCC:=$(HOSTCC)
 	REALCXX:=$(HOSTCXX)
@@ -540,38 +684,33 @@ ifdef EMULATE_READER
 	STRIP:=$(HOSTSTRIP)
 	AR:=$(HOSTAR)
 	LD:=$(HOSTLD)
+	OBJCOPY:=$(HOSTOBJCOPY)
 	RANLIB:=$(HOSTRANLIB)
+	READELF:=$(HOSTREADELF)
 	CFLAGS+=$(HOST_ARCH)
 	CXXFLAGS+=$(HOST_ARCH)
+	export PKG_CONFIG_LIBDIR := $(abspath $(STAGING_DIR)/lib/pkgconfig)$(if $(PKG_CONFIG_LIBDIR),:$(PKG_CONFIG_LIBDIR))
 else
-	# Use a CMake toolchain file to avoid all kinds of CMake insanity
-	export CROSS_TC:=$(CHOST)
-	ifndef SYSROOT
-		export SYSROOT:=$(shell PATH='$(PATH)' $(CC) -print-sysroot)
-	endif
-	export CROSS_STAGING:=$(CMAKE_STAGING_DIR)
-	export CMAKE_TCF:=-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/thirdparty/cmake_modules/CMakeCross.cmake
-	CMAKE+=$(CMAKE_TCF)
-	ifdef CCACHE
-		CMAKE_C_COMPILER_LAUNCHER:=$(CCACHE)
-		CMAKE_CXX_COMPILER_LAUNCHER:=$(CCACHE)
-	endif
 	REALCC:=$(CC)
 	REALCXX:=$(CXX)
-	# Don't let libtool piss on our parade...
-	# See what was mentioned around STATIC_LIBSTDCPP on ~L#93 for more details
-	# (cf. https://www.gnu.org/software/libtool/manual/html_node/Stripped-link-flags.html#Stripped-link-flags)
-	CC:=$(CC) -static-libstdc++
-	CXX:=$(strip $(CCACHE) $(CXX)) -static-libstdc++
-	CFLAGS+=$(ARM_ARCH) $(COMPAT_CFLAGS) -static-libstdc++
-	CXXFLAGS+=$(ARM_ARCH) $(COMPAT_CXXFLAGS) -static-libstdc++
-	LDFLAGS+=-static-libstdc++
+	CC:=$(strip $(CCACHE) $(CC))
+	CXX:=$(strip $(CCACHE) $(CXX))
+	CFLAGS+=$(ARM_ARCH) $(COMPAT_CFLAGS)
+	CXXFLAGS+=$(ARM_ARCH) $(COMPAT_CXXFLAGS)
 	# Make sure we always have mmap() support.
 	# This is critical for FreeType, since the usage of platform-specific code depends on this,
 	# and without it, we don't get CLOEXEC handling, which is problematic on Kobos, where we spawn stuff that might
 	# survive us, and if they inherit some of our fds pointing to the removable user area, bad things happen when it
 	# gets unmounted for USBMS handling....
 	export ac_cv_func_mmap_fixed_mapped=yes
+	# Never let pkg-config pickup native libraries (we don't actually rely on pkg-config anywhere, we do it all by hand).
+	# NOTE: Let people shoot themselves in the foot with custom pkg-config wrappers?
+	#undefine PKG_CONFIG
+	#unexport PKG_CONFIG
+	export PKG_CONFIG_LIBDIR := $(abspath $(STAGING_DIR)/lib/pkgconfig)
+	export PKG_CONFIG_PATH :=
+	# Nix the NixOS override, just to be sure.
+	export PKG_CONFIG_PATH_FOR_TARGET :=
 endif
 
 # not necessary to use PIC flag for win32 which has relocation table in dll
@@ -580,338 +719,366 @@ ifneq ($(TARGET), win32)
 	CXXFLAGS+=-fPIC
 endif
 
-# Try to make sure CMake picks up our flags...
-export CFLAGS
-export CXXFLAGS
-export LDFLAGS
-# And that our TC is honored
-export CC
-export CXX
-export AR
-export RANLIB
-export LD
-export STRIP
-ifdef WIN32
-	export RC
+# Improve reproducibility.
+ifndef DARWIN
+LDFLAGS += -Wl,--build-id=none
 endif
 
-# FIXME: If we cared, we'd probably need to do something to convince libzmq not
-# to enable support for eventfd [@GLIBC_2.7]
-# FIXED: To cross compile libzmq for GLIBC_2.4 you need to configure with the
-# option '--disable-eventfd'
-#
-# In the same vein, see base#421 for how to deal with an updated glibc symbol
-# for a function which did NOT change its signature, and where we don't have
-# access to a public definition of the old implementation, only a compat
-# versioned symbol.
-# With the added confusing quirk that the compat symbol (here, fmemopen) is
-# pinned to a different GLIBC version on arm than on x86... (cf. #2188).
-ifndef DARWIN
-ifndef ANDROID
-ifndef WIN32
-	# We're a glibc system... Find the actual libc used by our TC, and check if it's >= 2.22...
-	# We only care about that on non-emulated builds (i.e., arm), because compat symbols may be pinned
-	# to different versions on different arches, and we only account for arm in our patches.
-	ifndef EMULATE_READER
-		GLIBC_FILE=$(basename $(notdir $(realpath $(shell PATH='$(PATH)' $(CC) -print-file-name=libc.so.6))))
-		GLIBC_VER=$(shell echo $(GLIBC_FILE) | cut -f2 -d'-')
-		GLIBC_2_22_SORT=$(shell echo -e "$(GLIBC_VER)\n2.22" | sort -V | head -n1)
-		ifeq ($(GLIBC_2_22_SORT), 2.22)
-			ARM_GLIBC_GTE_2_22=1
-		endif
-	endif
-endif
-endif
-endif
+CFLAGS := $(strip $(CFLAGS))
+CXXFLAGS := $(strip $(CXXFLAGS))
+LDFLAGS := $(strip $(LDFLAGS))
 
 # NOTE: We generally want SIMD/ASM juicy stuff everywhere
-export WANT_SIMD=1
+WANT_SIMD=1
 # ... but on ARM targets that are not NEON capable, that obviously won't fly...
-ifneq (,$(findstring march=arm,$(CFLAGS)))
-	# We're on ARM
-	ifeq (,$(findstring fpu=neon,$(CFLAGS)))
-		# We don't support NEON
-		# NOTE: undefine is new to GNU make 3.82, so, do without because Android...
-		#undefine WANT_SIMD
-		WANT_SIMD=
-		unexport WANT_SIMD
-	endif
+ifneq (,$(filter -march=arm%,$(CFLAGS)))
+  # We're on ARM.
+  ifeq (,$(filter -march=armv8-a -mfpu=neon,$(CFLAGS)))
+    # We don't support NEON.
+    WANT_SIMD=
+  endif
+endif
+# ... ditto on Android x86, because the TC is old as hell, and that upsets libjpeg-turbo...
+ifeq ($(TARGET), android)
+  ifeq ($(ANDROID_ARCH), x86)
+    WANT_SIMD=
+  endif
 endif
 
-LIB_EXT=$(if $(WIN32),.dll,$(if $(DARWIN),.dylib,.so))
+ifneq (,$(DARWIN))
+  LIB_EXT = .dylib
+else ifneq (,$(WIN32))
+  LIB_EXT = .dll
+else
+  LIB_EXT = .so
+endif
 
 # you can probably leave these settings alone:
 
-THIRDPARTY_DIR=thirdparty
+THIRDPARTY_DIR = $(KOR_BASE)/thirdparty
 
-LUAFILESYSTEM_DIR=luafilesystem
+LUAROCKS_BINARY := $(abspath $(STAGING_DIR)/bin/luarocks)
 
-ZLIB_BUILD_DIR=$(THIRDPARTY_DIR)/zlib/build/$(MACHINE)
-ZLIB_DIR=$(CURDIR)/$(ZLIB_BUILD_DIR)/zlib-prefix/src/zlib
-ZLIB_STATIC=$(ZLIB_DIR)/libz.a
-
-MINIZIP_BUILD_DIR=$(THIRDPARTY_DIR)/minizip/build/$(MACHINE)
-MINIZIP_DIR=$(CURDIR)/$(MINIZIP_BUILD_DIR)/minizip-prefix/src/minizip
-AES_LIB_DIR=$(MINIZIP_DIR)/aes
-AES_LIB=$(MINIZIP_DIR)/libaes.a
-
-MUPDF_BUILD_DIR=$(CURDIR)/$(THIRDPARTY_DIR)/mupdf/build/$(MACHINE)
-MUPDF_DIR=$(MUPDF_BUILD_DIR)/mupdf-prefix/src/mupdf
-MUPDF_LIB_DIR=$(MUPDF_DIR)/build/$(if $(KODEBUG),debug,release)
-MUPDF_LIB_STATIC=$(MUPDF_LIB_DIR)/libmupdf.a
-MUPDF_THIRDPARTY_LIBS=$(MUPDF_LIB_DIR)/libmupdfthird.a \
-			$(AES_LIB)
-MUPDF_LIB=$(OUTPUT_DIR)/libs/libmupdf$(LIB_EXT)
-
-DJVULIBRE_BUILD_DIR=$(THIRDPARTY_DIR)/djvulibre/build/$(MACHINE)
-DJVULIBRE_DIR=$(CURDIR)/$(DJVULIBRE_BUILD_DIR)/djvulibre-prefix/src/djvulibre
-DJVULIBRE_LIB_EXT=$(if $(WIN32),-21.dll,$(if $(DARWIN),.21.dylib,.so.21))
-DJVULIBRE_LIB=$(OUTPUT_DIR)/libs/libdjvulibre$(DJVULIBRE_LIB_EXT)
-DJVULIBRE_LIB_DIR=$(DJVULIBRE_DIR)/libdjvu/.libs
-
-CRENGINE_BUILD_DIR=$(THIRDPARTY_DIR)/kpvcrlib/build/$(MACHINE)
-CRENGINE_DIR=$(CURDIR)/$(CRENGINE_BUILD_DIR)
-CRENGINE_SRC_DIR=$(CURDIR)/$(THIRDPARTY_DIR)/kpvcrlib/crengine
-CRENGINE_SRC_FILES=$(wildcard $(CRENGINE_SRC_DIR)/crengine/src/*.cpp)
-CRENGINE_SRC_FILES+=$(wildcard $(CRENGINE_SRC_DIR)/crengine/include/*.h)
-CRENGINE_LIB=$(OUTPUT_DIR)/libs/libcrengine$(LIB_EXT)
-
-LUAJIT_BUILD_DIR=$(THIRDPARTY_DIR)/luajit/build/$(MACHINE)
-LUAJIT_DIR=$(CURDIR)/$(LUAJIT_BUILD_DIR)/luajit-prefix/src/luajit
-LUAJIT=$(OUTPUT_DIR)/$(if $(WIN32),luajit.exe,luajit)
-LUAJIT_JIT=$(OUTPUT_DIR)/jit
-LUAJIT_LIB=$(OUTPUT_DIR)/$(if $(WIN32),lua51.dll,libs/libluajit.so)
-
-POPEN_NOSHELL_BUILD_DIR=$(THIRDPARTY_DIR)/popen-noshell/build/$(MACHINE)
-POPEN_NOSHELL_DIR=$(CURDIR)/$(POPEN_NOSHELL_BUILD_DIR)/popen-noshell-prefix/src/popen-noshell
-POPEN_NOSHELL_LIB=$(POPEN_NOSHELL_DIR)/libpopen_noshell.a
-
-LEPTONICA_BUILD_DIR=$(THIRDPARTY_DIR)/leptonica/build/$(MACHINE)
-LEPTONICA_DIR=$(CURDIR)/$(LEPTONICA_BUILD_DIR)/leptonica-prefix/src/leptonica
-
-TESSERACT_BUILD_DIR=$(THIRDPARTY_DIR)/tesseract/build/$(MACHINE)
-TESSERACT_DIR=$(CURDIR)/$(TESSERACT_BUILD_DIR)/tesseract-prefix/src/tesseract
-
-K2PDFOPT_BUILD_DIR=$(THIRDPARTY_DIR)/libk2pdfopt/build/$(MACHINE)
-K2PDFOPT_DIR=$(CURDIR)/$(K2PDFOPT_BUILD_DIR)/libk2pdfopt-prefix/src/libk2pdfopt
-K2PDFOPT_LIB_EXT=$(if $(WIN32),-2.dll,$(if $(DARWIN),.2.dylib,.so.2))
-K2PDFOPT_LIB=$(OUTPUT_DIR)/libs/libk2pdfopt$(K2PDFOPT_LIB_EXT)
-K2PDFOPT_CFLAGS=-I$(K2PDFOPT_DIR)/willuslib \
-		-I$(K2PDFOPT_DIR)/k2pdfoptlib -I$(K2PDFOPT_DIR) \
-		-I$(K2PDFOPT_DIR)/include_mod
-
-FREETYPE_LIB_EXT=$(if $(WIN32),-6.dll,$(if $(DARWIN),.6.dylib,.so.6))
-FREETYPE_LIB=$(OUTPUT_DIR)/libs/libfreetype$(FREETYPE_LIB_EXT)
-FREETYPE_BUILD_DIR=$(THIRDPARTY_DIR)/freetype2/build/$(MACHINE)
-FREETYPE_DIR=$(CURDIR)/$(FREETYPE_BUILD_DIR)/freetype2-prefix/src/freetype2-build
-
-HARFBUZZ_LIB_EXT=$(if $(WIN32),-0.dll,$(if $(DARWIN),.0.dylib,.so.0))
-HARFBUZZ_LIB=$(OUTPUT_DIR)/libs/libharfbuzz$(HARFBUZZ_LIB_EXT)
-HARFBUZZ_BUILD_DIR=$(THIRDPARTY_DIR)/harfbuzz/build/$(MACHINE)
-HARFBUZZ_DIR=$(CURDIR)/$(HARFBUZZ_BUILD_DIR)/harfbuzz-prefix/src/harfbuzz-build
-
-FRIBIDI_LIB_EXT=$(if $(WIN32),-0.dll,$(if $(DARWIN),.0.dylib,.so.0))
-FRIBIDI_LIB=$(OUTPUT_DIR)/libs/libfribidi$(FRIBIDI_LIB_EXT)
-FRIBIDI_BUILD_DIR=$(THIRDPARTY_DIR)/fribidi/build/$(MACHINE)
-FRIBIDI_DIR=$(CURDIR)/$(FRIBIDI_BUILD_DIR)/fribidi-prefix/src/fribidi-build
-
-LIBUNIBREAK_LIB_EXT=$(if $(WIN32),-3.dll,$(if $(DARWIN),.3.dylib,.so.3))
-LIBUNIBREAK_LIB=$(OUTPUT_DIR)/libs/libunibreak$(LIBUNIBREAK_LIB_EXT)
-LIBUNIBREAK_BUILD_DIR=$(THIRDPARTY_DIR)/libunibreak/build/$(MACHINE)
-LIBUNIBREAK_DIR=$(CURDIR)/$(LIBUNIBREAK_BUILD_DIR)/libunibreak-prefix/src/libunibreak-build
-
-UTF8PROC_LIB_EXT=$(if $(WIN32),-2.dll,$(if $(DARWIN),.2.dylib,.so.2))
-UTF8PROC_LIB=$(OUTPUT_DIR)/libs/libutf8proc$(UTF8PROC_LIB_EXT)
-UTF8PROC_BUILD_DIR=$(THIRDPARTY_DIR)/utf8proc/build/$(MACHINE)
-UTF8PROC_DIR=$(CURDIR)/$(UTF8PROC_BUILD_DIR)/utf8proc-prefix/src/utf8proc
-
-JPEG_LIB_EXT=$(if $(WIN32),-8.dll,$(if $(DARWIN),.8.dylib,.so.8))
-JPEG_LIB=$(OUTPUT_DIR)/libs/libjpeg$(JPEG_LIB_EXT)
-TURBOJPEG_LIB=$(OUTPUT_DIR)/libs/libturbojpeg$(if $(WIN32),.dll,$(if $(DARWIN),.dylib,.so))
-JPEG_BUILD_DIR=$(THIRDPARTY_DIR)/libjpeg-turbo/build/$(MACHINE)
-JPEG_DIR=$(CURDIR)/$(JPEG_BUILD_DIR)/libjpeg-turbo-prefix/src/libjpeg-turbo-build
-
-PNG_LIB_EXT=$(if $(WIN32),-16.dll,$(if $(DARWIN),.16.dylib,.so.16))
-PNG_LIB=$(OUTPUT_DIR)/libs/libpng16$(PNG_LIB_EXT)
-PNG_BUILD_DIR=$(THIRDPARTY_DIR)/libpng/build/$(MACHINE)
-PNG_DIR=$(CURDIR)/$(PNG_BUILD_DIR)/libpng-prefix/src/libpng-build
-
-LODEPNG_LIB=$(OUTPUT_DIR)/libs/liblodepng$(LIB_EXT)
-LODEPNG_BUILD_DIR=$(THIRDPARTY_DIR)/lodepng/build/$(MACHINE)
-LODEPNG_DIR=$(CURDIR)/$(LODEPNG_BUILD_DIR)/lodepng-prefix/src/lodepng
-
-GIF_LIB_EXT=$(if $(WIN32),-7.dll,$(if $(DARWIN),.7.dylib,.so.7))
-GIF_LIB=$(OUTPUT_DIR)/libs/libgif$(GIF_LIB_EXT)
-GIF_BUILD_DIR=$(THIRDPARTY_DIR)/giflib/build/$(MACHINE)
-GIF_DIR=$(CURDIR)/$(GIF_BUILD_DIR)/giflib-prefix/src/giflib-build
-
-LIBFFI_BUILD_DIR=$(THIRDPARTY_DIR)/libffi/build/$(MACHINE)
-LIBFFI_DIR=$(CURDIR)/$(LIBFFI_BUILD_DIR)/libffi-prefix/src/libffi-build
-
-SDCV_BUILD_DIR=$(THIRDPARTY_DIR)/sdcv/build/$(MACHINE)
-SDCV_DIR=$(CURDIR)/$(SDCV_BUILD_DIR)/sdcv-build
-GLIB_BUILD_DIR=$(THIRDPARTY_DIR)/glib/build/$(MACHINE)
-GLIB_DIR=$(CURDIR)/$(GLIB_BUILD_DIR)/glib-prefix/src/glib-build
-LIBICONV_BUILD_DIR=$(THIRDPARTY_DIR)/libiconv/build/$(MACHINE)
-LIBICONV_DIR=$(CURDIR)/$(LIBICONV_BUILD_DIR)/libiconv-prefix/src/libiconv-build
-GETTEXT_BUILD_DIR=$(THIRDPARTY_DIR)/gettext/build/$(MACHINE)
-GETTEXT_DIR=$(CURDIR)/$(GETTEXT_BUILD_DIR)/gettext-prefix/src/gettext-build
-
-LIBICONV=$(LIBICONV_DIR)/lib/libiconv.a
-LIBGETTEXT=$(GETTEXT_DIR)/lib/libintl.a
-GLIB=$(GLIB_DIR)/lib/libglib-2.0$(if $(DARWIN),.dylib,.so.0)
-GLIB_STATIC=$(GLIB_DIR)/lib/libglib-2.0.a
-ZLIB=$(OUTPUT_DIR)/libs/$(if $(WIN32),zlib1.dll,$(if $(DARWIN),libz.1.dylib,libz.so.1))
-
-LEPT_LIB_EXT=$(if $(WIN32),-5.dll,$(if $(DARWIN),.5.dylib,.so.5))
-LEPTONICA_LIB=$(OUTPUT_DIR)/libs/liblept$(LEPT_LIB_EXT)
-TESS_LIB_EXT=$(if $(WIN32),-3.dll,$(if $(DARWIN),.3.dylib,.so.3))
-TESSERACT_LIB=$(OUTPUT_DIR)/libs/libtesseract$(TESS_LIB_EXT)
-
-OPENSSL_BUILD_DIR=$(THIRDPARTY_DIR)/openssl/build/$(MACHINE)
-OPENSSL_DIR=$(CURDIR)/$(OPENSSL_BUILD_DIR)/openssl-prefix/src/openssl
-OPENSSL_LIB=$(OPENSSL_DIR)/libssl.$(if $(WIN32),a,so)
-SSL_LIB=$(OUTPUT_DIR)/libs/libssl$(if $(WIN32),-1.dll,$(if $(DARWIN),.1.1.dylib,.so.1.1))
-CRYPTO_LIB=$(OUTPUT_DIR)/libs/libcrypto$(if $(WIN32),-1.dll,$(if $(DARWIN),.1.1.dylib,.so.1.1))
-
-LUASOCKET_BUILD_DIR=$(THIRDPARTY_DIR)/luasocket/build/$(MACHINE)
-LUASOCKET_DIR=$(CURDIR)/luasocket-prefix/src/luasocket
-LUASEC_BUILD_DIR=$(THIRDPARTY_DIR)/luasec/build/$(MACHINE)
-LUASEC_DIR=$(CURDIR)/$(LUASEC_BUILD_DIR)/luasec-prefix/src/luasec
-LUASOCKET=$(OUTPUT_DIR)/common/socket
-LUASEC=$(OUTPUT_DIR)/common/ssl
-
-EVERNOTE_SDK_BUILD_DIR=$(THIRDPARTY_DIR)/evernote-sdk-lua/build/$(MACHINE)
-EVERNOTE_SDK_DIR=$(CURDIR)/$(EVERNOTE_SDK_BUILD_DIR)/evernote-sdk-lua-prefix/src/evernote-sdk-lua
-EVERNOTE_PLUGIN_DIR=$(OUTPUT_DIR)/plugins/evernote.koplugin
-EVERNOTE_THRIFT_DIR=$(EVERNOTE_PLUGIN_DIR)/thrift
-EVERNOTE_LIB=$(EVERNOTE_PLUGIN_DIR)/lib/libluasocket.so
-LUALONGNUMBER=$(CURDIR)/$(OUTPUT_DIR)/libs/liblualongnumber.so
-
-LUASERIAL_BUILD_DIR=$(THIRDPARTY_DIR)/lua-serialize/build/$(MACHINE)
-LUASERIAL_DIR=$(CURDIR)/$(LUASERIAL_BUILD_DIR)/lua-serialize-prefix/src/lua-serialize
-LUASERIAL_LIB=$(OUTPUT_DIR)/common/serialize.so
-LUACOMPAT52=$(CURDIR)/$(OUTPUT_DIR)/libs/libluacompat52.so
-
-ZMQ_BUILD_DIR=$(THIRDPARTY_DIR)/libzmq/build/$(MACHINE)
-ZMQ_DIR=$(CURDIR)/$(ZMQ_BUILD_DIR)/libzmq-prefix/src/libzmq-build
-ZMQ_LIB_EXT=$(if $(WIN32),.dll,$(if $(DARWIN),.4.dylib,.so.4))
-ZMQ_LIB=$(OUTPUT_DIR)/libs/libzmq$(ZMQ_LIB_EXT)
-CZMQ_BUILD_DIR=$(THIRDPARTY_DIR)/czmq/build/$(MACHINE)
-CZMQ_DIR=$(CURDIR)/$(CZMQ_BUILD_DIR)/czmq-prefix/src/czmq-build
-FILEMQ_BUILD_DIR=$(THIRDPARTY_DIR)/filemq/build/$(MACHINE)
-FILEMQ_DIR=$(CURDIR)/$(FILEMQ_BUILD_DIR)/filemq-prefix/src/filemq-build
-ZYRE_BUILD_DIR=$(THIRDPARTY_DIR)/zyre/build/$(MACHINE)
-ZYRE_DIR=$(CURDIR)/$(ZYRE_BUILD_DIR)/zyre-prefix/src/zyre-build
-CZMQ_FMQ_ZYRE_LIB_EXT=$(if $(WIN32),.dll,$(if $(DARWIN),.1.dylib,.so.1))
-CZMQ_LIB=$(OUTPUT_DIR)/libs/libczmq$(CZMQ_FMQ_ZYRE_LIB_EXT)
-FILEMQ_LIB=$(OUTPUT_DIR)/libs/libfmq$(CZMQ_FMQ_ZYRE_LIB_EXT)
-ZYRE_LIB=$(OUTPUT_DIR)/libs/libzyre$(CZMQ_FMQ_ZYRE_LIB_EXT)
-
-TAR_BUILD_DIR=$(THIRDPARTY_DIR)/tar/build/$(MACHINE)
-TAR_DIR=$(CURDIR)/$(TAR_BUILD_DIR)/tar-prefix/src/tar-build
-DROPBEAR_BUILD_DIR=$(THIRDPARTY_DIR)/dropbear/build/$(MACHINE)
-DROPBEAR_DIR=$(CURDIR)/$(DROPBEAR_BUILD_DIR)/dropbear-prefix/src/dropbear-build
-OPENSSH_BUILD_DIR=$(THIRDPARTY_DIR)/openssh/build/$(MACHINE)
-OPENSSH_DIR=$(CURDIR)/$(OPENSSH_BUILD_DIR)/openssh-prefix/src/openssh-build
-FBINK_BUILD_DIR=$(THIRDPARTY_DIR)/fbink/build/$(MACHINE)
-FBINK_DIR=$(CURDIR)/$(FBINK_BUILD_DIR)/fbink-prefix/src/fbink-build
-
-CURL_BUILD_DIR=$(THIRDPARTY_DIR)/curl/build/$(MACHINE)
-CURL_DIR=$(CURDIR)/$(CURL_BUILD_DIR)/curl-prefix/src/curl-build
-# NOTE: We rename cURL on PB because everything is terrible (c.f., #5861)
-CURL_LIB_EXT=$(if $(WIN32),.dll,$(if $(DARWIN),.dylib,$(if $(POCKETBOOK),_ko.so.4,.so.4)))
-CURL_LIB=$(OUTPUT_DIR)/libs/libcurl$(CURL_LIB_EXT)
-
-ZSYNC2_BUILD_DIR=$(THIRDPARTY_DIR)/zsync2/build/$(MACHINE)
-ZSYNC2_DIR=$(CURDIR)/$(ZSYNC2_BUILD_DIR)/zsync2-prefix/src/zsync2-build
-
-TURBO_BUILD_DIR=$(THIRDPARTY_DIR)/turbo/build/$(MACHINE)
-TURBO_DIR=$(CURDIR)/$(TURBO_BUILD_DIR)/turbo-prefix/src/turbo
-TURBO_FFI_WRAP_LIB=$(OUTPUT_DIR)/common/libtffi_wrap$(LIB_EXT)
-
-LUA_SPORE_BUILD_DIR=$(THIRDPARTY_DIR)/lua-Spore/build/$(MACHINE)
-LUA_SPORE_DIR=$(CURDIR)/$(LUA_SPORE_BUILD_DIR)/lua-Spore-prefix/src/lua-Spore
-SPORE_VER=0.3.1-1
-LUA_SPORE_VER=lua-spore-$(SPORE_VER)
-# Unversioned LR 2 path
-LUAROCKS_DIR=$(OUTPUT_DIR)/rocks/lib/luarocks/rocks
-# Versioned LR 3 path, see koreader-base/pull/1003
-ifeq ($(LR_GT_3_0),1)
-LUAROCKS_DIR=$(OUTPUT_DIR)/rocks/lib/luarocks/rocks-5.1
-endif
-LUA_SPORE_ROCK=$(LUAROCKS_DIR)/lua-spore/$(SPORE_VER)/$(LUA_SPORE_VER).rockspec
-
-SQLITE_BUILD_DIR=$(THIRDPARTY_DIR)/sqlite/build/$(MACHINE)
-SQLITE_DIR=$(CURDIR)/$(SQLITE_BUILD_DIR)/sqlite-prefix/src/sqlite-build
-SQLITE_LIB_EXT=$(if $(WIN32),.dll,$(if $(DARWIN),.dylib,.so))
-SQLITE_LIB=$(OUTPUT_DIR)/libs/libsqlite3$(SQLITE_LIB_EXT)
-
-LUA_LJ_SQLITE_DIR=$(CURDIR)/$(THIRDPARTY_DIR)/lua-ljsqlite3
-LUA_LJ_SQLITE_INSTALL_DIR=$(OUTPUT_DIR)/common/lua-ljsqlite3
-LUA_LJ_SQLITE=$(LUA_LJ_SQLITE_INSTALL_DIR)/init.lua
-
-
-# pure LuaJIT module, so no need to separate build dir by MACHINE
-LJ_WPACLIENT_FILES=wpaclient.lua socket_h.lua consts_h.lua socket.lua wpa_ctrl.lua
-LJ_WPACLIENT_BUILD_DIR=$(THIRDPARTY_DIR)/lj-wpaclient/build
-LJ_WPACLIENT_DIR=$(CURDIR)/$(LJ_WPACLIENT_BUILD_DIR)/lj-wpaclient-prefix/src/lj-wpaclient
-LJ_WPACLIENT=$(addprefix $(OUTPUT_DIR)/common/lj-wpaclient/, $(LJ_WPACLIENT_FILES))
-
-# Nanosvg headers (that include code)
-NANOSVG_HEADER_FILES=nanosvg.h nanosvgrast.h stb_image_write.h
-NANOSVG_BUILD_DIR=$(THIRDPARTY_DIR)/nanosvg/build/
-NANOSVG_DIR=$(CURDIR)/$(NANOSVG_BUILD_DIR)/nanosvg-prefix/src
-NANOSVG_INCLUDE_DIR=$(CURDIR)/$(NANOSVG_BUILD_DIR)/include
-NANOSVG_HEADERS=$(addprefix $(NANOSVG_INCLUDE_DIR)/, $(NANOSVG_HEADER_FILES))
-
-# CFLAGS for the Lua/C/C++ modules:
-#
-# setting the rpath to '$ORIGIN' will make the dynamic linker search
-# for the library in the same path as the executable that references
-# them.
-#
-# also, dynamic libraries must be compiled with "-shared" and "-fPIC".
-# having all symbols included (-E) won't hurt, too.
-DYNLIB_CFLAGS=-L$(CURDIR)/$(OUTPUT_DIR)/libs $(CFLAGS) -I$(LUAJIT_DIR)/src -shared
-DYNLIB_CXXFLAGS=-L$(CURDIR)/$(OUTPUT_DIR)/libs $(CXXFLAGS) -I$(LUAJIT_DIR)/src -shared
-DYNLIB_CMAKE_CFLAGS=-L$(CURDIR)/$(OUTPUT_DIR)/libs $(CFLAGS) -I$(LUAJIT_DIR)/src -shared
-DYNLIB_CMAKE_CXXFLAGS=-L$(CURDIR)/$(OUTPUT_DIR)/libs $(CXXFLAGS) -I$(LUAJIT_DIR)/src -shared
+# Dynamic libraries must be compiled with "-shared" and "-fPIC".
+# (And we enforce PIC everywhere via CFLAGS/CXXFLAGS).
+DYNLIB_LDFLAGS = -shared
 ifdef DARWIN
-	DYNLIB_CFLAGS+=-dynamiclib -undefined dynamic_lookup
-	DYNLIB_CXXFLAGS+=-dynamiclib -undefined dynamic_lookup
-else
-	DYNLIB_CFLAGS+=-Wl,-E -Wl,-rpath,'$$ORIGIN'
-	DYNLIB_CXXFLAGS+=-Wl,-E -Wl,-rpath,'$$ORIGIN'
+	DYNLIB_LDFLAGS += -dynamiclib -undefined dynamic_lookup
 endif
 
-# RPATH for all libraries in koreader/libs. The expand path looks like below:
-# make            -> shell         -> cmake     -> configure -> make    -> linker
-# \\\$$\\\$$ORIGIN   \\\$\\\$ORIGIN   \$\$ORIGIN   $$ORIGIN     $$ORIGIN   $ORIGIN
-ORIGIN_CMAKE_TO_AUTOCFG=\\\$$\\\$$ORIGIN
+MONOLIBTIC ?= $(ANDROID)
 
-ifdef DARWIN
-	DYNLIB_CMAKE_CFLAGS+=-dynamiclib -undefined dynamic_lookup
-	DYNLIB_CMAKE_CXXFLAGS+=-dynamiclib -undefined dynamic_lookup
-else
-	DYNLIB_CMAKE_CFLAGS+=-Wl,-E -Wl,-rpath,'$(ORIGIN_CMAKE_TO_AUTOCFG)'
-	DYNLIB_CMAKE_CXXFLAGS+=-Wl,-E -Wl,-rpath,'$(ORIGIN_CMAKE_TO_AUTOCFG)'
+# CMake toolchain file. {{{
+
+CMAKE_TCF = $(CMAKE_DIR)/toolchain.cmake
+CMAKE_FLAGS += -DCMAKE_TOOLCHAIN_FILE='$(abspath $(CMAKE_TCF))'
+
+# CMAKE_SYSTEM_PROCESSOR
+# FIXME: use more fine grained values for ARM targets?
+# (Cf. https://github.com/taka-no-me/android-cmake)
+ifneq (,$(filter aarch64-%,$(CHOST)))
+  CMAKE_SYSTEM_PROCESSOR = aarch64
+else ifneq (,$(filter arm-% armv7a-%,$(CHOST)))
+  CMAKE_SYSTEM_PROCESSOR = arm
+else ifneq (,$(filter i686-%,$(CHOST)))
+  CMAKE_SYSTEM_PROCESSOR = i686
+else ifneq (,$(filter x86_64-%,$(CHOST)))
+  CMAKE_SYSTEM_PROCESSOR = x86_64
+else ifneq (,$(CHOST))
+  $(error CMAKE_SYSTEM_PROCESSOR not set! (CHOST is $(CHOST)))
 endif
 
-LPEG_BUILD_DIR=$(THIRDPARTY_DIR)/lpeg/build/$(MACHINE)
-LPEG_DIR=$(CURDIR)/$(LPEG_BUILD_DIR)/lpeg-prefix/src/lpeg
-LPEG_RE=$(OUTPUT_DIR)/rocks/share/lua/5.1/re.lua
-LPEG_DYNLIB=$(OUTPUT_DIR)/rocks/lib/lua/5.1/lpeg.so
+# Native & cross definitions.
+define cmake_toolchain
 
+cmake_minimum_required(VERSION 3.16.3)
 
-CMAKE_THIRDPARTY_LIBS := kpvcrlib,nanosvg
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),evernote-sdk-lua,luajit,lpeg,turbo
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),zyre,czmq,filemq,libzmq
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),libk2pdfopt,tesseract,leptonica
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),lj-wpaclient
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),lua-Spore,luasec,luasocket,libffi,lua-serialize,glib,lodepng,minizip
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),djvulibre,mupdf,freetype2,harfbuzz,giflib,libpng,zlib
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),tar,sdcv,libiconv,gettext,libjpeg-turbo,popen-noshell,sqlite
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),openssl,dropbear,openssh
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),curl,zsync2
-CMAKE_THIRDPARTY_LIBS := $(CMAKE_THIRDPARTY_LIBS),fbink
+# CMake Cross ToolChain config file. Adapted from Debian's dpkg-cross ;).
+# c.f., https://cmake.org/cmake/help/latest/manual/cmake-toolchains.7.html#cross-compiling-toolchain
+# NOTE: Remember that CMake is a special snowflake that completely *ignores* CPPFLAGS,
+# because of course it does...
+# (https://gitlab.kitware.com/cmake/cmake/issues/12928)
+
+# Build type.
+set(CMAKE_BUILD_TYPE $(if $(KODEBUG),Debug,Release))
+set(CMAKE_DEBUG_POSTFIX "")
+
+# Disable run time path handling (we have our own).
+# And no, just using `set(CMAKE_SKIP_RPATH TRUE)`
+# does not work: we end up with empty RPATH entries
+# in some cases (e.g. with libwebp).
+set(CMAKE_INSTALL_RPATH "")
+set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+
+# C language.
+$(if $(CCACHE),set(CMAKE_C_COMPILER_LAUNCHER $(CCACHE)))
+set(CMAKE_C_COMPILER $(REALCC))
+set(CMAKE_C_FLAGS_INIT "$(strip $(CFLAGS))")
+
+# C++ language.
+$(if $(CCACHE),set(CMAKE_CXX_COMPILER_LAUNCHER $(CCACHE)))
+set(CMAKE_CXX_COMPILER $(REALCXX))
+set(CMAKE_CXX_FLAGS_INIT "$(strip $(CXXFLAGS))")
+
+# OBJC language (for SDL2 on macOS).
+$(if $(CCACHE),set(CMAKE_OBJC_COMPILER_LAUNCHER $(CCACHE)))
+set(CMAKE_OBJC_COMPILER $(REALCC))
+
+# Release only flags: prevent CMake from messing
+# with our custom optimization level and flags.
+set(CMAKE_C_FLAGS_RELEASE "")
+set(CMAKE_CXX_FLAGS_RELEASE "")
+
+# Linker.
+set(CMAKE_EXE_LINKER_FLAGS_INIT "$(strip $(LDFLAGS))")
+set(CMAKE_SHARED_LINKER_FLAGS_INIT "$(strip $(filter-out -shared -dynamiclib,$(LDFLAGS) $(DYNLIB_LDFLAGS)))")
+set(CMAKE_MODULE_LINKER_FLAGS_INIT $${CMAKE_SHARED_LINKER_FLAGS_INIT})
+
+# Tools.
+set(CMAKE_AR $(AR) CACHE FILEPATH "Archive")
+set(CMAKE_LD $(LD) CACHE FILEPATH "LD")
+set(CMAKE_NM $(NM) CACHE FILEPATH "NM")
+set(CMAKE_RANLIB $(RANLIB) CACHE FILEPATH "RanLib")
+set(CMAKE_READELF $(READELF) CACHE FILEPATH "ReadELF")
+$(if $(WIN32),set(CMAKE_RC_COMPILER $(RC) CACHE FILEPATH "Resource Compiler"))
+set(CMAKE_STRIP true CACHE FILEPATH "Strip")
+
+# Set path(s) to search for libraries/binaries/headers.
+set(CMAKE_FIND_ROOT_PATH $(abspath $(STAGING_DIR)))
+set(CMAKE_PREFIX_PATH $${CMAKE_FIND_ROOT_PATH})
+# So we don't include an outdated `png.h` provided by one of macOS' frameworks.
+set(CMAKE_FIND_FRAMEWORK LAST)
+
+# Install directories.
+set(CMAKE_INSTALL_PREFIX $(abspath $(STAGING_DIR)) CACHE FILEPATH "install prefix")
+# NOTE: can't use a relative paths (as recommended in the documentation)
+# because libjpeg-turbo only configures successfully with absolute paths.
+set(CMAKE_INSTALL_BINDIR     $${CMAKE_INSTALL_PREFIX}/bin     CACHE FILEPATH "install directory: binaries")
+set(CMAKE_INSTALL_INCLUDEDIR $${CMAKE_INSTALL_PREFIX}/include CACHE FILEPATH "install directory: includes")
+set(CMAKE_INSTALL_LIBDIR     $${CMAKE_INSTALL_PREFIX}/lib     CACHE FILEPATH "install directory: libraries")
+
+set(APPLE $(DARWIN))
+set(LINUX $(if $(DARWIN)$(WIN32),,1))
+set(WIN32 $(WIN32))
+
+endef
+
+# Cross-compile only definitions.
+define cmake_cross_toolchain
+
+$(cmake_toolchain)
+
+# OS.
+# NOTE: use Linux for Android too (cf. https://github.com/taka-no-me/android-cmake and
+# https://android.googlesource.com/platform/ndk/+/master/build/cmake/android.toolchain.cmake)
+# In the meantime, I'll be sitting in the corner, crying hysterically.
+set(CMAKE_SYSTEM_NAME $(if $(DARWIN),Darwin,$(if $(WIN32),Windows,Linux)))
+
+# Magical value that inhibits all of CMake's own NDK handling code. (Or shit goes boom.)
+$(if $(ANDROID),set(CMAKE_SYSTEM_VERSION 1))
+$(if $(ANDROID),set(ANDROID_STL c++_shared))
+# Also disable versioning of shared objects.
+$(if $(ANDROID),set(CMAKE_PLATFORM_NO_VERSIONED_SONAME TRUE))
+
+# Target architecture.
+set(CMAKE_SYSTEM_PROCESSOR $(CMAKE_SYSTEM_PROCESSOR))
+
+# Search for programs in the build host directories.
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+# For libraries and headers in the target directories.
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+# As well as for CMake packages too.
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+endef
+
+# }}}
+
+# KOReader variables: for forwarding definitions to CMake. {{{
+
+CMAKE_KOVARS = $(CMAKE_DIR)/koreader_vars.cmake
+CMAKE_FLAGS += -DCMAKE_KOVARS='$(abspath $(CMAKE_KOVARS))'
+
+define cmake_koreader_vars
+
+set(BASE_CFLAGS    "$(strip $(BASE_CFLAGS))")
+set(CCACHE         "$(strip $(CCACHE))")
+set(CHOST          $(CHOST))
+set(EMULATE_READER $(EMULATE_READER))
+set(HOSTCC         "$(strip $(HOSTCC))")
+set(HOSTCFLAGS     "$(strip $(HOSTCFLAGS))")
+set(HOSTCXX        "$(strip $(HOSTCXX))")
+set(LIB_EXT        $(LIB_EXT))
+set(VECTO_CFLAGS   "$(VECTO_CFLAGS)")
+
+set(BASE_DIR       $(abspath $(KOR_BASE)))
+set(OUTPUT_DIR     $(abspath $(OUTPUT_DIR)))
+set(STAGING_DIR    $(abspath $(STAGING_DIR)))
+set(SPEC_ROCKS_DIR $(abspath $(SPEC_ROCKS_DIR)))
+set(THIRDPARTY_DIR $(abspath $(THIRDPARTY_DIR)))
+
+set(MAKE $(MAKE))
+set(NINJA $(NINJA))
+
+list(PREPEND CMAKE_MODULE_PATH $${THIRDPARTY_DIR}/cmake_modules)
+
+# Convenience autotools-like variables.
+set(CC             "$(strip $(CC))")
+set(CFLAGS         "$(strip $(CFLAGS))")
+set(CXX            "$(strip $(CXX))")
+set(CXXFLAGS       "$(strip $(CXXFLAGS))")
+set(LD             "$(strip $(LD))")
+set(LDFLAGS        "$(strip $(LDFLAGS))")
+set(DYNLIB_LDFLAGS "$(strip $(LDFLAGS) $(DYNLIB_LDFLAGS))")
+set(AR             "$(strip $(AR))")
+set(NM             "$(strip $(NM))")
+set(OBJCOPY        "$(strip $(OBJCOPY))")
+set(RANLIB         "$(strip $(RANLIB))")
+set(RC             "$(strip $(RC))")
+set(STRIP          "$(strip $(STRIP))")
+
+# Meson.
+set(MESON_TOOLCHAINS --native-file=$(abspath $(MESON_HOST_TOOLCHAIN)) $(if $(filter-out $(MESON_HOST_TOOLCHAIN),$(MESON_CROSS_TOOLCHAIN)),--cross-file=$(abspath $(MESON_CROSS_TOOLCHAIN))))
+set(MESON_FILE_ARG $(if $(filter-out $(MESON_HOST_TOOLCHAIN),$(MESON_CROSS_TOOLCHAIN)),--cross-file,--native-file))
+
+# Miscellaneous.
+set(MONOLIBTIC         $(MONOLIBTIC))
+set(USE_LJ_WPACLIENT   $(USE_LJ_WPACLIENT))
+set(USE_SDL            $(SDL))
+set(WANT_SIMD          $(WANT_SIMD))
+set(GLIBC_VERSION_MAX  $(GLIBC_VERSION_MAX))
+
+# Platform flags.
+set(ANDROID        $(ANDROID))
+set(APPIMAGE       $(APPIMAGE))
+set(CERVANTES      $(CERVANTES))
+set(DARWIN_AARCH64 $(DARWIN_AARCH64))
+set(KINDLE         $(KINDLE))
+set(KOBO           $(KOBO))
+set(LEGACY         $(LEGACY))
+set(MACOS          $(MACOS))
+set(POCKETBOOK     $(POCKETBOOK))
+set(REMARKABLE     $(REMARKABLE))
+set(SONY_PRSTUX    $(SONY_PRSTUX))
+
+set(SKIP_LUAJIT_BIN $(SKIP_LUAJIT_BIN))
+set(USE_LUAJIT_LIB  $(USE_LUAJIT_LIB))
+
+endef
+
+# }}}
+
+# Meson toolchain file(s). {{{
+
+comma:=,
+
+define meson_toolchain
+
+[constants]
+CCACHE = $(if $(CCACHE),'$(CCACHE)','env')
+CPPFLAGS = ['-I$(abspath $(STAGING_DIR)/include)']
+CFLAGS = []
+CXXFLAGS = []
+LDFLAGS = ['-L$(abspath $(STAGING_DIR)/lib)']
+
+[binaries]
+c = [CCACHE, '$(strip $(REALCC))']
+# c_ld
+cpp = [CCACHE, '$(strip $(REALCXX))']
+# cpp_ld
+ar = '$(strip $(AR))'
+nm = '$(strip $(NM))'
+pkgconfig = 'pkg-config'
+pkg-config = 'pkg-config'
+ranlib = '$(strip $(RANLIB))'
+strip = 'true'
+
+[built-in options]
+buildtype = '$(if $(KODEBUG),debug,release)'
+c_args = [$(patsubst %,'%'$(comma),$(CFLAGS))] + CPPFLAGS + CFLAGS
+c_link_args = [$(patsubst %,'%'$(comma),$(LDFLAGS))] + LDFLAGS
+cpp_args = [$(patsubst %,'%'$(comma),$(CXXFLAGS))] + CPPFLAGS + CXXFLAGS
+cpp_link_args = [$(patsubst %,'%'$(comma),$(LDFLAGS))] + LDFLAGS
+
+endef
+
+ifdef EMULATE_READER
+
+MESON_CROSS_TOOLCHAIN = $(CMAKE_DIR)/meson_toolchain.ini
+MESON_HOST_TOOLCHAIN = $(CMAKE_DIR)/meson_toolchain.ini
+
+else
+
+MESON_CROSS_TOOLCHAIN = $(CMAKE_DIR)/meson_cross_toolchain.ini
+MESON_HOST_TOOLCHAIN = $(CMAKE_DIR)/meson_host_toolchain.ini
+
+MESON_CROSS_SYSTEM = $(if $(ANDROID),android,linux)
+ifneq (,$(filter aarch64-%,$(CHOST)))
+  MESON_CROSS_CPU_FAMILY = aarch64
+else ifneq (,$(filter arm-% armv7a-%,$(CHOST)))
+  MESON_CROSS_CPU_FAMILY = arm
+else ifneq (,$(filter i686-%,$(CHOST)))
+  MESON_CROSS_CPU_FAMILY = x86
+else ifneq (,$(filter x86_64-%,$(CHOST)))
+  MESON_CROSS_CPU_FAMILY = x86_64
+else ifneq (,$(CHOST))
+  $(error MESON_CROSS_CPU_FAMILY not set! (CHOST is $(CHOST)))
+endif
+MESON_CROSS_CPU = $(or $(patsubst -march=%,%,$(filter -march=%,$(CFLAGS))),$(MESON_CROSS_CPU_FAMILY))
+MESON_CROSS_ENDIAN = little
+
+define meson_cross_toolchain
+$(meson_toolchain)
+
+[host_machine]
+system = '$(MESON_CROSS_SYSTEM)'
+cpu_family = '$(MESON_CROSS_CPU_FAMILY)'
+cpu = '$(MESON_CROSS_CPU)'
+endian = '$(MESON_CROSS_ENDIAN)'
+endef
+
+define meson_host_toolchain
+
+[constants]
+CCACHE = $(if $(CCACHE),'$(CCACHE)','env')
+
+[binaries]
+c = [CCACHE, '$(strip $(HOSTCC))']
+# c_ld
+cpp = [CCACHE, '$(strip $(HOSTCXX))']
+# cpp_ld
+ar = '$(strip $(HOSTSTRIP))'
+ranlib = '$(strip $(HOSTRANLIB))'
+strip = 'true'
+
+[built-in options]
+buildtype = '$(if $(KODEBUG),debug,release)'
+c_args = [$(patsubst %,'%'$(comma),$(HOSTCFLAGS))]
+cpp_args = [$(patsubst %,'%'$(comma),$(HOSTCFLAGS))]
+
+endef
+
+endif
+
+# }}}
+
+# Testing support. {{{
+
+ifneq (,$(EMULATE_READER))
+
+define runtests_fn
+runtests() {(
+kodir="$$1";
+shift 1;
+"$$kodir/spec/runtests" $(PARALLEL_JOBS:%=-j%) "$$@";
+)}
+endef
+
+RUNTESTS = $(strip $(runtests_fn)); runtests
+
+endif
+
+# }}}
+
+# vim: foldmethod=marker foldlevel=0

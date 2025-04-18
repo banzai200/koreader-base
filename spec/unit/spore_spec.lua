@@ -1,6 +1,3 @@
-package.path = "rocks/share/lua/5.1/?.lua;common/?.lua;" .. package.path
-package.cpath = "rocks/lib/lua/5.1/?.so;common/?.so;" .. package.cpath
-
 local service = [[
 {
     "base_url" : "http://services.org:9999/restapi/",

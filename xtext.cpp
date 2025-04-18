@@ -8,6 +8,8 @@
 // For many links and notes about the concepts and libraries used,
 // see: https://github.com/koreader/crengine/issues/307
 
+#include <assert.h>
+
 extern "C"
 {
 #include <lua.h>
@@ -21,7 +23,11 @@ extern "C"
 #include <hb-ft.h>
 
 // FriBiDi
-#include <fribidi/fribidi.h>
+#include <fribidi.h>
+
+// Freetype
+#include <freetype/ftmodapi.h>
+#include <freetype/ftsizes.h>
 
 // libunibreak
 #include <wordbreak.h>
@@ -66,6 +72,9 @@ extern "C"
 #define NOT_MEASURED INT_MIN
 #define REPLACEMENT_CHAR 0xFFFD
 #define ELLIPSIS_CHAR 0x2026
+#define ZERO_WIDTH_JOINER_CHAR 0x200D
+#define SOFTHYPHEN_CHAR 0x00AD
+#define REALHYPHEN_CHAR 0x002D
 
 // Helpers with font metrics (units are 1/64 px)
 // #define FONT_METRIC_FLOOR(x)    ((x) & -64)
@@ -246,6 +255,8 @@ int Utf8ToUnicode(const char * src,  int srclen, uint32_t * dst, int dstlen, boo
 #define CHAR_IS_PARA_END                 0x0200
 #define CHAR_PARA_IS_RTL                 0x0400 /// to know the line with this char is part
                                                 /// of a paragraph with main dir RTL
+#define CHAR_IS_UNSAFE_TO_BREAK_BEFORE   0x0800 /// from HarfBuzz (set when kerning or on arabic when
+                                                /// initial/medial/final char forms are involved)
 #define CHAR_IS_TAB                      0x1000 /// char is '\t'
 
 // Info, after measure(), about each m_text char
@@ -275,6 +286,7 @@ typedef struct {
 // Holder of HB data structures per font, to be stored as a userdata
 // in the Lua font table
 typedef struct {
+    FT_Size        ft_size;
     hb_font_t *    hb_font;
     hb_buffer_t *  hb_buffer;
     hb_feature_t * hb_features;
@@ -311,6 +323,7 @@ public:
     hb_language_t m_hb_language;
 
     int m_width; // measured full width
+    int m_hyphen_width; // width of the hyphen char found first among the fonts
     uint32_t *           m_text;        // array of unicode chars
     xtext_charinfo_t *   m_charinfo;    // info about each of these unicode chars
     FriBidiCharType *    m_bidi_ctypes; // FriBiDi internal helper structures
@@ -331,6 +344,7 @@ public:
        ,m_lang(NULL)
        ,m_hb_language(HB_LANGUAGE_INVALID)
        ,m_width(NOT_MEASURED)
+       ,m_hyphen_width(NOT_MEASURED)
        ,m_text(NULL)
        ,m_charinfo(NULL)
        ,m_bidi_ctypes(NULL)
@@ -347,11 +361,15 @@ public:
     }
 
     void allocate() {
-        m_charinfo = (xtext_charinfo_t *)calloc(m_length, sizeof(*m_charinfo)); // set all flags to 0
+        // We allocate one slot more than m_length, for the case we would have to
+        // truncate with an ellipsis the last char and we need to actually use a
+        // ZERO_WIDTH_JOINER before the ELLIPSIS (which might be needed with Arabic)
+        size_t size = m_length + 1;
+        m_charinfo = (xtext_charinfo_t *)calloc(size, sizeof(*m_charinfo)); // set all flags to 0
         if ( m_has_rtl ) {
-            m_bidi_ctypes = (FriBidiCharType *)malloc(m_length * sizeof(*m_bidi_ctypes));
-            m_bidi_btypes = (FriBidiBracketType *)malloc(m_length * sizeof(*m_bidi_btypes));
-            m_bidi_levels = (FriBidiLevel *)malloc(m_length * sizeof(*m_bidi_levels));
+            m_bidi_ctypes = (FriBidiCharType *)malloc(size * sizeof(*m_bidi_ctypes));
+            m_bidi_btypes = (FriBidiBracketType *)malloc(size * sizeof(*m_bidi_btypes));
+            m_bidi_levels = (FriBidiLevel *)malloc(size * sizeof(*m_bidi_levels));
         }
     }
     void deallocate() {
@@ -360,7 +378,7 @@ public:
         if (m_bidi_ctypes) { free(m_bidi_ctypes); m_bidi_ctypes = NULL; }
         if (m_bidi_btypes) { free(m_bidi_btypes); m_bidi_btypes = NULL; }
         if (m_bidi_levels) { free(m_bidi_levels); m_bidi_levels = NULL; }
-        if (m_lang)        { delete m_lang;       m_lang = NULL; }
+        if (m_lang)        { delete[] m_lang;     m_lang = NULL; }
         m_no_longer_usable = true;
     }
 
@@ -376,7 +394,8 @@ public:
         // count the number of unicode codepoints, before allocating m_text,
         // and a 2nd to actually do the conversion and fill m_text.
         m_length = Utf8ToUnicode(utf8_text, utf8_len, NULL, 0, m_is_valid, m_has_rtl);
-        m_text = (uint32_t *)malloc(m_length * sizeof(*m_text));
+        size_t size = m_length + 1; // (one slot more, see above)
+        m_text = (uint32_t *)malloc(size * sizeof(*m_text));
 
         // m_has_rtl is only detected in the 2nd phase.
         // If m_para_direction_rtl is true, set m_has_rtl=true in all case
@@ -396,13 +415,14 @@ public:
     // of invalid bytes).
     // Our setTextFromUTF8String() may not always give a m_text
     // equivalent to InputType.charlist - but we need them to be sync'ed
-    // for correct cursor positionning and text insertion/deletion.
+    // for correct cursor positioning and text insertion/deletion.
     // So, we allow XText to handle such input: this avoid having to sync
     // both utf8 decoding algorithms (but we can aim later at having
     // a single good one).
     void setTextFromUTF8CharsLuaArray(lua_State * L, int n) {
-        m_length = lua_objlen(L, n);
-        m_text = (uint32_t *)malloc(m_length * sizeof(*m_text));
+        m_length = (int) lua_objlen(L, n); // NOTE: size_t -> int, as that's what both FriBidi & HarfBuzz expect.
+        size_t size = m_length + 1; // (one slot more, see above)
+        m_text = (uint32_t *)malloc(size * sizeof(*m_text));
         m_is_valid = true; // assume it is valid if coming from Lua array
         m_has_rtl = false;
         // If m_para_direction_rtl is true, set m_has_rtl=true in all case
@@ -552,17 +572,17 @@ public:
 
         // Not previously stored: we have to create it and store it
 
-        // Get the 'ftface' Freetype FFI wrapped object
-        lua_getfield(m_L, -1, "ftface");
+        // Get the 'ftsize' Freetype FFI wrapped object
+        lua_getfield(m_L, -1, "ftsize");
         // printf("face type: %d %s\n", lua_type(m_L, -1), lua_typename(m_L, lua_type(m_L, -1)));
         // We expect it to be a luajit ffi cdata, but the C API does not have a #define for
         // that type. But it looks like its value is higher than the greatest LUA_T* type.
         if ( lua_type(m_L, -1) <= LUA_TTHREAD ) {// Higher plain Lua datatype (lua.h)
             luaL_typerror(m_L, -1, "cdata");
         }
-        // Get the usable (for Harfbuzz) FT_Face object
-        FT_Face * face = (FT_Face *)lua_topointer(m_L, -1);
-        lua_pop(m_L, 1); // remove ftface object
+        // Get the usable (for Harfbuzz) FT_Size object
+        FT_Size size = *(FT_Size *)lua_topointer(m_L, -1);
+        lua_pop(m_L, 1); // remove ftsize object
 
         // Create a Lua userdata that will keep the reference to our hb_data
         // (alloc/free of this userdata is managed by Lua, but not the cleanup
@@ -575,7 +595,11 @@ public:
         // Set this userdata as the '_hb_font_data' key of our Lua font table
         lua_setfield(m_L, -2, XTEXT_LUA_HB_FONT_DATA_TABLE_KEY_NAME);
 
-        hb_data->hb_font = hb_ft_font_create_referenced(*face);
+        ++*(int *)size->generic.data;
+        FT_Activate_Size(size);
+        hb_data->ft_size = size;
+        FT_Reference_Library((FT_Library)size->face->generic.data);
+        hb_data->hb_font = hb_ft_font_create_referenced(size->face);
         // These flags should be sync'ed with freetype.lua FT_Load_Glyph_flags:
         // hb_ft_font_set_load_flags(hb_data->hb_font, FT_LOAD_TARGET_LIGHT | FT_LOAD_FORCE_AUTOHINT);
         // No hinting, as it would mess synthetized bold.
@@ -609,6 +633,28 @@ public:
 
         lua_settop(m_L, stack_orig_top); // restore stack / drop our added work stuff
         return hb_data;
+    }
+
+    int getHyphenWidth() {
+        if ( m_hyphen_width != NOT_MEASURED )
+            return m_hyphen_width;
+        for ( int font_num=0; font_num < MAX_FONT_NUM; font_num++ ) {
+            xtext_hb_font_data * hb_data = getHbFontData(font_num);
+            if ( !hb_data ) { // No such font (so, no more fallback font)
+                m_hyphen_width = 0;
+                break;
+            }
+            FT_Activate_Size(hb_data->ft_size);
+            hb_font_t * _hb_font = hb_data->hb_font;
+            hb_codepoint_t glyph_id;
+            if ( hb_font_get_glyph(_hb_font, REALHYPHEN_CHAR, 0, &glyph_id) ) {
+                hb_position_t x, y;
+                hb_font_get_glyph_advance_for_direction(_hb_font, glyph_id, HB_DIRECTION_LTR, &x, &y);
+                m_hyphen_width = FONT_METRIC_TO_PX(x);
+                break;
+            }
+        }
+        return m_hyphen_width;
     }
 
     void measure() {
@@ -690,7 +736,7 @@ public:
             else {
                 // When at end of m_text, add a letter ('Z') so a trailing \n can be
                 // flagged as CHAR_MUST_BREAK_AFTER, so we can show an empty line
-                // and allow the cursor to be positionned after that last \n.
+                // and allow the cursor to be positioned after that last \n.
                 int ch = i < m_length ? m_text[i] : 'Z';
                 int brk = lb_process_next_char(&lbCtx, ch);
                 // This tells us about a break between previous char and this 'ch'.
@@ -799,6 +845,8 @@ public:
         if ( !hb_data ) // No such font (so, no more fallback font)
             return NOT_MEASURED;
 
+        FT_Activate_Size(hb_data->ft_size);
+
         hb_font_t *    _hb_font     = hb_data->hb_font;
         hb_buffer_t *  _hb_buffer   = hb_data->hb_buffer;
         hb_feature_t * _hb_features = hb_data->hb_features;
@@ -905,6 +953,7 @@ public:
         int cur_cluster = 0;
         int hg = 0;  // index in glyph_info/glyph_pos
         int hcl = 0; // cluster number of glyph at hg
+        bool cur_cluster_unsafe_to_break = false;
         int t_notdef_start = -1;
         int t_notdef_end = -1;
         int notdef_width = 0;
@@ -922,7 +971,12 @@ public:
                         #ifdef DEBUG_MEASURE_TEXT
                             printf("(found cp=%x) ", glyph_info[hg].codepoint);
                         #endif
-                        if ( t_notdef_start >= 0 ) { // But we have a segment of previous ".notdef"
+                        // Note: in crengine, we needed to add the following additional condition
+                        // to only process past notdef when the first glyph of a cluster is found.
+                        // This strangely seems not needed here (the thai sample that caused issues
+                        // with crengine displays fine in xtext), but let's add it for consistency.
+                        if ( t_notdef_start >= 0 && hcl > cur_cluster ) {
+                            // We have a segment of previous ".notdef", and this glyph starts a new cluster
                             t_notdef_end = t;
 
                             // Let a fallback font replace the wrong values in widths and flags
@@ -971,6 +1025,8 @@ public:
                     #endif
                     cur_width += advance;
                     cur_cluster = hcl;
+                    hb_glyph_flags_t flags = hb_glyph_info_get_glyph_flags(&glyph_info[hg]);
+                    cur_cluster_unsafe_to_break = flags & HB_GLYPH_FLAG_UNSAFE_TO_BREAK;
                     hg++;
                     continue; // keep grabbing glyphs
                 }
@@ -1001,6 +1057,8 @@ public:
             }
             if ( is_rtl )
                 m_charinfo[t].flags |= CHAR_IS_RTL;
+            if ( cur_cluster_unsafe_to_break )
+                m_charinfo[t].flags |= CHAR_IS_UNSAFE_TO_BREAK_BEFORE;
 
             #ifdef DEBUG_MEASURE_TEXT
                 printf("=> %d (flags=%d) => W=%d\n", cur_width, m_charinfo[t].flags, final_width);
@@ -1045,7 +1103,7 @@ public:
     // No bidi involved: this works with chars in logical order.
     // Returns onto the Lua stack a table with various information about the line.
     // (no_line_breaking_rules=true is just used by TextWidget to truncate its text to max_width)
-    void makeLine(int start, int targeted_width, bool no_line_breaking_rules, int tabstop_width) {
+    void makeLine(int start, int targeted_width, bool no_line_breaking_rules, int tabstop_width, int expansion_pct_rather_than_hyphen) {
         // Notes:
         // - Given how TextBoxWidget functions work, end_offset is
         //   inclusive: the line spans offset to end_offset included.
@@ -1058,6 +1116,8 @@ public:
         int next_line_start_offset = -1;
         int candidate_end = -1;
         int candidate_line_width = 0;
+        int extendable_width = 0;
+        bool candidate_is_soft_hyphen = true; // If the first candidate is a soft-hyphen allow it to be used
         bool forced_break = false;
         bool has_tabs = false;
         int line_width = 0;
@@ -1066,7 +1126,7 @@ public:
             forced_break = false;
             int flags;
             if ( no_line_breaking_rules )
-                flags = CHAR_CAN_WRAP_AFTER; // Allow cutting on any char
+                flags = m_charinfo[i].flags | CHAR_CAN_WRAP_AFTER; // Allow cutting on any char
             else
                 flags = m_charinfo[i].flags;
             int new_line_width = line_width + m_charinfo[i].width;
@@ -1088,12 +1148,48 @@ public:
                     candidate_line_width = line_width;
                     candidate_end = i > start ? i-1 : start;
                     next_line_start_offset = i+1;
+                    candidate_is_soft_hyphen = false;
+                }
+                else if ( m_text[i] == SOFTHYPHEN_CHAR ) {
+                    bool avoid = false;
+                    if ( !exceeding && expansion_pct_rather_than_hyphen > 0 ) {
+                        // We consider a soft-hyphen a candidate only if:
+                        // - the previous candidate is not a soft-hyphen, and its width with all
+                        //   spaces expanded by this percent would be exceeding (meaning we will
+                        //   be fine with this candidate and justification will expand the spaces
+                        //   but not too much)
+                        // - or previous candidate is a soft-hyphen, and as we have already
+                        //   started hyphenating, we don't need to avoid a better one.
+                        if ( !candidate_is_soft_hyphen &&
+                                candidate_line_width + extendable_width * expansion_pct_rather_than_hyphen / 100 >= targeted_width ) {
+                            avoid = true;
+                        }
+                    }
+                    // A soft-hyphen has a width of 0. But if we end this line on it,
+                    // it should be rendered as a real hyphen with a width.
+                    // So, to consider it a candidate for end, be sure we still won't
+                    // exceed the targeted width when it is replaced.
+                    if ( !exceeding && !avoid ) {
+                        int hyphen_width = getHyphenWidth();
+                        exceeding = new_line_width + hyphen_width > targeted_width;
+                        if ( !exceeding ) {
+                            // If we really end this line with this, the line width will include
+                            // a visible hyphen (but we don't touch line_width / new_line_width,
+                            // measured with the 0-width softhyphen, which will be used when
+                            // processing next chars).
+                            candidate_line_width = new_line_width + hyphen_width;
+                            candidate_end = i;
+                            next_line_start_offset = i+1;
+                            candidate_is_soft_hyphen = true;
+                        }
+                    }
                 }
                 else { // CJK char, or non-last space in a sequence of consecutive spaces
                     if ( !exceeding ) {
                         candidate_line_width = new_line_width;
                         candidate_end = i;
                         next_line_start_offset = i+1;
+                        candidate_is_soft_hyphen = false;
                     }
                 }
                 if ( flags & CHAR_MUST_BREAK_AFTER ) {
@@ -1109,6 +1205,9 @@ public:
                 break;
             }
             line_width = new_line_width;
+            if ( flags & CHAR_CAN_EXTEND_WIDTH ) {
+                extendable_width += m_charinfo[i].width;
+            }
             i += 1;
             // printf("%d < %d && %d <= %d ?\n", i, m_length, line_width, targeted_width);
         }
@@ -1136,50 +1235,50 @@ public:
         // We could have used some indirection to make that more
         // generic, but let's push a table suitable to be added
         // directly to TextBoxWidget.vertical_string_list
-        lua_newtable(m_L);
+        lua_createtable(m_L, 0, 5); // 5 hash fields for sure
 
         lua_pushstring(m_L, "offset");
         lua_pushinteger(m_L, start+1); // (Lua indices start at 1)
-        lua_settable(m_L, -3);
+        lua_rawset(m_L, -3);
 
         lua_pushstring(m_L, "end_offset");
         lua_pushinteger(m_L, candidate_end+1); // (Lua indices start at 1)
-        lua_settable(m_L, -3);
+        lua_rawset(m_L, -3);
 
         lua_pushstring(m_L, "can_be_justified");
         lua_pushboolean(m_L, can_be_justified);
-        lua_settable(m_L, -3);
+        lua_rawset(m_L, -3);
 
         lua_pushstring(m_L, "width");
         lua_pushinteger(m_L, candidate_line_width);
-        lua_settable(m_L, -3);
+        lua_rawset(m_L, -3);
 
         lua_pushstring(m_L, "targeted_width");
         lua_pushinteger(m_L, targeted_width);
-        lua_settable(m_L, -3);
+        lua_rawset(m_L, -3);
 
         if ( no_allowed_break_met ) {
             lua_pushstring(m_L, "no_allowed_break_met");
             lua_pushboolean(m_L, true);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
         }
 
         if ( has_tabs ) {
             lua_pushstring(m_L, "has_tabs");
             lua_pushboolean(m_L, true);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
         }
 
         if ( next_line_start_offset >= 0 && next_line_start_offset < m_length ) {
             // next_start_offset is to be nil if end of text
             lua_pushstring(m_L, "next_start_offset");
             lua_pushinteger(m_L, next_line_start_offset+1); // (Lua indices start at 1)
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
         }
         else if ( forced_break && next_line_start_offset == m_length ) {
             lua_pushstring(m_L, "hard_newline_at_eot");
             lua_pushboolean(m_L, true);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
         }
     }
 
@@ -1190,43 +1289,132 @@ public:
     //   on it in logical order, and we'll give it segments of consecutive chars in
     //   the same level
     void shapeLine(int start, int end, int idx_to_substitute_with_ellipsis=-1) {
-        // Temporarily substitute a char from text with an ellipsis if requested.
-        // We'll restore the original item from m_text and m_charinfo when done.
-        bool orig_idx_substituted = false;
-        // Backups, to be restored when done
+        // We may substitute a char from text with an ellipsis or a real hyphen.
+        // We'll backup and restore the original item from m_text and m_charinfo when done.
+        int idx_substituted = -1;
         uint32_t orig_idx_char;
         unsigned short orig_idx_charinfo_flags; // .width is not used, no need to update it
         FriBidiCharType orig_idx_bidi_ctype = 0;
         FriBidiLevel orig_idx_bidi_level = 0;
+        // We may have to substitute a second char (ZWJ + Eliipsis)
+        int idx2_substituted = -1;
+        uint32_t orig_idx2_char;
+        unsigned short orig_idx2_charinfo_flags; // .width is not used, no need to update it
+        FriBidiCharType orig_idx2_bidi_ctype = 0;
+        FriBidiLevel orig_idx2_bidi_level = 0;
+
         if ( idx_to_substitute_with_ellipsis >= 0 && idx_to_substitute_with_ellipsis < m_length ) {
-            orig_idx_substituted = true;
-            orig_idx_char = m_text[idx_to_substitute_with_ellipsis];
-            orig_idx_charinfo_flags = m_charinfo[idx_to_substitute_with_ellipsis].flags;
-            m_text[idx_to_substitute_with_ellipsis] = ELLIPSIS_CHAR;
-            m_charinfo[idx_to_substitute_with_ellipsis].flags &= ~CHAR_CAN_EXTEND_WIDTH;
-            m_charinfo[idx_to_substitute_with_ellipsis].flags &= ~CHAR_CAN_EXTEND_WIDTH_FALLBACK;
-            m_charinfo[idx_to_substitute_with_ellipsis].flags &= ~CHAR_IS_CLUSTER_TAIL;
-            m_charinfo[idx_to_substitute_with_ellipsis].flags &= ~CHAR_SCRIPT_CHANGE; // ellipsis is script neutral
+            // If the char we're substituting has "unsafe to break (from previous char)", there
+            // may be some kerning between these chars (which is not an issue), or it could be
+            // some arabic (or other script) char: the previous char (that we are not replacing)
+            // may have an arabic initial or medial form because it is not final; when replacing
+            // the next one with an ellipsis, it could get an isolated or final form, which could
+            // change the meaning of the truncated word, or make it longer (and have the ellipsis
+            // overflowing the target width).
+            // To avoid this, we need to add a ZERO WIDTH JOINER before the ellipsis (we hope
+            // this won't cause any issue with other scripts or occurences of "unsafe to break").
+            // (All this applies similarly with an ellipsis at start, considering the next char.)
+            bool ellipsis_at_end = idx_to_substitute_with_ellipsis == end-1 && end-2 >= start;
+            bool ellipsis_at_start = idx_to_substitute_with_ellipsis == start && start+1 <= end-1;
+            int idx_to_mimic_bidi = -1;
+            int idx_to_substitute_with_zwj = -1;
+            if ( ellipsis_at_end ) {
+                // Set the bidi level of our ellipsis (and our zwj) to be the same as the
+                // neighbour we keep, so it's not moved away from it
+                idx_to_mimic_bidi = idx_to_substitute_with_ellipsis - 1;
+                if ( m_charinfo[idx_to_substitute_with_ellipsis].flags & CHAR_IS_UNSAFE_TO_BREAK_BEFORE ) {
+                    idx_to_substitute_with_zwj = idx_to_substitute_with_ellipsis;
+                    idx_to_substitute_with_ellipsis = idx_to_substitute_with_ellipsis + 1;
+                    end = end + 1; // include that additional replaced char in the segment to shape
+                    // We made sure to have all our buffers be m_length+1, so we can hack one slot
+                    // away from m_length if idx_to_substitute_with_ellipsis = end-1 = m_length-1
+                }
+            }
+            else if ( ellipsis_at_start ) {
+                idx_to_mimic_bidi = idx_to_substitute_with_ellipsis + 1;
+                if ( m_charinfo[idx_to_mimic_bidi].flags & CHAR_IS_UNSAFE_TO_BREAK_BEFORE ) {
+                    // Unlike when at end, we don't have a slot to add both the ellipsis
+                    // and a zwj if start=0, so don't add it (this is rather rarely used
+                    // by frontend, so we should be fine).
+                    if ( idx_to_substitute_with_ellipsis > 0 ) {
+                        idx_to_substitute_with_zwj = idx_to_substitute_with_ellipsis;
+                        idx_to_substitute_with_ellipsis = idx_to_substitute_with_ellipsis - 1;
+                        start = start - 1;
+                    }
+                }
+            }
+            else {
+                // Standalone ellipsis: just substitute it, nothing else special to do
+            }
+
+            // Substitute the ellipsis
+            idx_substituted = idx_to_substitute_with_ellipsis;
+            orig_idx_char = m_text[idx_substituted];
+            orig_idx_charinfo_flags = m_charinfo[idx_substituted].flags;
+            m_text[idx_substituted] = ELLIPSIS_CHAR;
+            m_charinfo[idx_substituted].flags &= ~CHAR_CAN_EXTEND_WIDTH;
+            m_charinfo[idx_substituted].flags &= ~CHAR_CAN_EXTEND_WIDTH_FALLBACK;
+            m_charinfo[idx_substituted].flags &= ~CHAR_SCRIPT_CHANGE; // ellipsis is script neutral
                                                 // Looks like we can keep all other flags as is
             if ( m_has_bidi ) {
-                // Be sure UAX#9 rules I1, I2, L1 to L4 don't move the ellipsis away
-                // from its neighbours
-                orig_idx_bidi_ctype = m_bidi_ctypes[idx_to_substitute_with_ellipsis];
-                orig_idx_bidi_level = m_bidi_levels[idx_to_substitute_with_ellipsis];
-                // If we're substituting start or end (which is what we do in frontend),
-                // set the bidi level of our ellipsis to be start+1 or end-1, so
-                // it's not moved away from next or previous char.
-                if ( idx_to_substitute_with_ellipsis == end-1 && end-1 >= start)
-                    m_bidi_levels[idx_to_substitute_with_ellipsis] = m_bidi_levels[end-1];
-                else if ( idx_to_substitute_with_ellipsis == start && start+1 < end)
-                    m_bidi_levels[idx_to_substitute_with_ellipsis] = m_bidi_levels[start+1];
+                // Be sure UAX#9 rules I1, I2, L1 to L4 don't move the ellipsis away from its neighbour
+                orig_idx_bidi_ctype = m_bidi_ctypes[idx_substituted];
+                orig_idx_bidi_level = m_bidi_levels[idx_substituted];
+                m_bidi_levels[idx_substituted] = m_bidi_levels[idx_to_mimic_bidi];
                 // Also get the real bidi type of our ellipsis (if it is replacing a space,
                 // we don't want it to be FRIBIDI_MASK_WS as fribidi_reorder_line() could
                 // then move it at start or end in visual order)
-                fribidi_get_bidi_types((const FriBidiChar*)(m_text+idx_to_substitute_with_ellipsis), 1,
-                                         (FriBidiCharType*)(m_bidi_ctypes+idx_to_substitute_with_ellipsis));
+                fribidi_get_bidi_types((const FriBidiChar*)(m_text+idx_substituted), 1,
+                                         (FriBidiCharType*)(m_bidi_ctypes+idx_substituted));
+            }
+
+            // Substitute the zwj if any
+            if ( idx_to_substitute_with_zwj >= 0 ) {
+                idx2_substituted = idx_to_substitute_with_zwj;
+                orig_idx2_char = m_text[idx2_substituted];
+                orig_idx2_charinfo_flags = m_charinfo[idx2_substituted].flags;
+                m_text[idx2_substituted] = ZERO_WIDTH_JOINER_CHAR;
+                m_charinfo[idx2_substituted].flags &= ~CHAR_CAN_EXTEND_WIDTH;
+                m_charinfo[idx2_substituted].flags &= ~CHAR_CAN_EXTEND_WIDTH_FALLBACK;
+                m_charinfo[idx2_substituted].flags &= ~CHAR_SCRIPT_CHANGE;
+                if ( m_has_bidi ) {
+                    orig_idx2_bidi_ctype = m_bidi_ctypes[idx2_substituted];
+                    orig_idx2_bidi_level = m_bidi_levels[idx2_substituted];
+                    m_bidi_levels[idx2_substituted] = m_bidi_levels[idx_to_mimic_bidi];
+                    fribidi_get_bidi_types((const FriBidiChar*)(m_text+idx2_substituted), 1,
+                                             (FriBidiCharType*)(m_bidi_ctypes+idx2_substituted));
+                }
             }
         }
+        else if ( m_text[end-1] == SOFTHYPHEN_CHAR ) {
+            // If the last char in logical order is a soft hyphen, we had the line cut
+            // here and we should show a real hyphen. This is also what we have to do
+            // if this logical end is not the visual end (a LTR word hyphenated among
+            // RTL text may happen in the middle of a line, and the hyphen should show
+            // there).
+            idx_substituted = end-1;
+            orig_idx_char = m_text[idx_substituted];
+            orig_idx_charinfo_flags = m_charinfo[idx_substituted].flags;
+            m_text[idx_substituted] = REALHYPHEN_CHAR;
+            m_charinfo[idx_substituted].flags &= ~CHAR_SCRIPT_CHANGE; // have it script neutral
+            if ( m_has_bidi ) {
+                // Mostly as done above for the ellipsis
+                orig_idx_bidi_ctype = m_bidi_ctypes[idx_substituted];
+                orig_idx_bidi_level = m_bidi_levels[idx_substituted];
+                // Be sure the real hyphen has the bidi level of its preceding character
+                if ( idx_substituted > 0 )
+                    m_bidi_levels[idx_substituted] = m_bidi_levels[idx_substituted-1];
+                // Looks like we can't keep the bidi type (control char, boundary neutral)
+                // of the soft hyphen, as it could be forwarded to start/end of line.
+                // We could pick the type of the previous char, but it could be anything.
+                // It may be safer to get the bidi type of the real hyphen (European
+                // Number Separator), even if it is ambiguous: the BiDi algo may just do
+                // the right/best thing with it.
+                fribidi_get_bidi_types((const FriBidiChar*)(m_text+idx_substituted), 1,
+                                         (FriBidiCharType*)(m_bidi_ctypes+idx_substituted));
+            }
+        }
+
         // If m_has_bidi, we need the help of fribidi to visually reorder
         // the text, before feeding segments (of possible different
         // directions) to Harfbuzz.
@@ -1409,13 +1597,21 @@ public:
         // and provide a width_without_trailing_spaces, so text justification
         // can ignore them.
 
-        // Restore the char that we replaced with an ellipsis
-        if ( orig_idx_substituted ) {
-            m_text[idx_to_substitute_with_ellipsis] = orig_idx_char;
-            m_charinfo[idx_to_substitute_with_ellipsis].flags = orig_idx_charinfo_flags;
+        // Restore the char(s) (and their properties) that we replaced
+        if ( idx_substituted >=0 ) {
+            m_text[idx_substituted] = orig_idx_char;
+            m_charinfo[idx_substituted].flags = orig_idx_charinfo_flags;
             if ( m_has_bidi ) {
-                m_bidi_ctypes[idx_to_substitute_with_ellipsis] = orig_idx_bidi_ctype;
-                m_bidi_levels[idx_to_substitute_with_ellipsis] = orig_idx_bidi_level;
+                m_bidi_ctypes[idx_substituted] = orig_idx_bidi_ctype;
+                m_bidi_levels[idx_substituted] = orig_idx_bidi_level;
+            }
+        }
+        if ( idx2_substituted >=0 ) {
+            m_text[idx2_substituted] = orig_idx2_char;
+            m_charinfo[idx2_substituted].flags = orig_idx2_charinfo_flags;
+            if ( m_has_bidi ) {
+                m_bidi_ctypes[idx2_substituted] = orig_idx2_bidi_ctype;
+                m_bidi_levels[idx2_substituted] = orig_idx2_bidi_level;
             }
         }
 
@@ -1426,7 +1622,7 @@ public:
         int nb_can_extend_fallback = 0;
         bool has_tabs = false;
 
-        lua_createtable(m_L, nb_glyphs, 0 ); // array of glyphs, pre-sized
+        lua_createtable(m_L, nb_glyphs, 3); // array of glyphs, pre-sized
         for(int i = 0; i < nb_glyphs; i++) {
             xtext_shapeinfo_t * s = &s_shape_result[i];
 
@@ -1436,62 +1632,62 @@ public:
             if (s->can_extend_fallback)
                 nb_can_extend_fallback++;
 
-            lua_newtable(m_L); // key/value table of info about a single glyph
+            lua_createtable(m_L, 0, 11); // key/value table of info about a single glyph, at least 11 fields
 
             lua_pushstring(m_L, "font_num");
             lua_pushinteger(m_L, s->font_num);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "glyph");
             lua_pushinteger(m_L, s->glyph);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "text_index");
             lua_pushinteger(m_L, s->text_index + 1); // (Lua indices start at 1)
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "x_advance");
             lua_pushinteger(m_L, s->x_advance);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "x_offset");
             lua_pushinteger(m_L, s->x_offset);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "y_offset");
             lua_pushinteger(m_L, s->y_offset);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "is_rtl");
             lua_pushboolean(m_L, s->is_rtl);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             if ( m_has_bidi ) {
                 lua_pushstring(m_L, "bidi_level");
                 lua_pushinteger(m_L, m_bidi_levels[s->text_index]);
-                lua_settable(m_L, -3);
+                lua_rawset(m_L, -3);
             }
 
             lua_pushstring(m_L, "is_cluster_start");
             lua_pushboolean(m_L, s->is_cluster_start);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "cluster_len");
             lua_pushinteger(m_L, s->cluster_len);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "can_extend");
             lua_pushboolean(m_L, s->can_extend);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             lua_pushstring(m_L, "can_extend_fallback");
             lua_pushboolean(m_L, s->can_extend_fallback);
-            lua_settable(m_L, -3);
+            lua_rawset(m_L, -3);
 
             if ( s->is_tab ) {
                 lua_pushstring(m_L, "is_tab");
                 lua_pushboolean(m_L, true);
-                lua_settable(m_L, -3);
+                lua_rawset(m_L, -3);
                 has_tabs = true;
             }
 
@@ -1499,19 +1695,28 @@ public:
         }
 
         // Add some global line metrics as keys/values
+        lua_pushstring(m_L, "width");
         lua_pushinteger(m_L, total_advance);
-        lua_setfield(m_L, -2, "width");
+        lua_rawset(m_L, -3);
+
+        lua_pushstring(m_L, "nb_can_extend");
         lua_pushinteger(m_L, nb_can_extend);
-        lua_setfield(m_L, -2, "nb_can_extend");
+        lua_rawset(m_L, -3);
+
+        lua_pushstring(m_L, "nb_can_extend_fallback");
         lua_pushinteger(m_L, nb_can_extend_fallback);
-        lua_setfield(m_L, -2, "nb_can_extend_fallback");
+        lua_rawset(m_L, -3);
+
         if (m_charinfo[start].flags & CHAR_PARA_IS_RTL) {
+            lua_pushstring(m_L, "para_is_rtl");
             lua_pushboolean(m_L, true);
-            lua_setfield(m_L, -2, "para_is_rtl");
+            lua_rawset(m_L, -3);
         }
+
         if ( has_tabs ) {
+            lua_pushstring(m_L, "has_tabs");
             lua_pushboolean(m_L, true);
-            lua_setfield(m_L, -2, "has_tabs");
+            lua_rawset(m_L, -3);
         }
 
         // Note: instead of returning an array table, we could allocate
@@ -1546,6 +1751,8 @@ public:
         if ( !hb_data ) // No such font (so, no more fallback font)
             return;
 
+        FT_Activate_Size(hb_data->ft_size);
+
         hb_font_t *    _hb_font     = hb_data->hb_font;
         hb_buffer_t *  _hb_buffer   = hb_data->hb_buffer;
         hb_feature_t * _hb_features = hb_data->hb_features;
@@ -1556,7 +1763,8 @@ public:
         // for (int i = start; i < end; i++) {
         //     hb_buffer_add(_hb_buffer, (hb_codepoint_t)(m_text[i]), i);
         // }
-        hb_buffer_add_codepoints(_hb_buffer, (hb_codepoint_t*)m_text, m_length, start, end-start);
+        int extra = (end > m_length) ? 1 : 0; // in case we added ZWJ+Ellipsis at end
+        hb_buffer_add_codepoints(_hb_buffer, (hb_codepoint_t*)m_text, m_length+extra, start, end-start);
         hb_buffer_set_content_type(_hb_buffer, HB_BUFFER_CONTENT_TYPE_UNICODE);
 
         // If we are provided with direction and hints, let harfbuzz know
@@ -1855,9 +2063,8 @@ public:
         free(s_utf8);
     }
 
-    // Get (as a single UTF-8 string) the segment of m_text, extended to include
-    // the full words that may be cut at boundaries (start, end).
-    void getSelectedWords(int start, int end, int context) {
+    // Get start and end indices of an extended segment of m_text that includes the full words that may be cut at boundaries (start, end).
+    void getSelectedWordIndices(int start, int end, int context) {
         // Not much documentation about libunibreak word breaking,
         // some insight in:
         //  http://www.unicode.org/reports/tr29/tr29-25.html
@@ -1917,20 +2124,8 @@ public:
             wend++;
         }
 
-        // FriBiDi provides a unicode to UTF-8 conversion function, so use it.
-        // Let's be cheap and not count the nb of bytes really needed to store the
-        // UTF-8 encoding of each Unicode codepoint: go allocate for the max (4).
-        // (As we're called to return user selected text, we shouldn't waste
-        // too much - and we'll free it just below.)
-        len = wend - wstart;
-        char * s_utf8 = (char *)malloc(len * 4*sizeof(char) + 1);
-        fribidi_unicode_to_charset(FRIBIDI_CHAR_SET_UTF8, m_text+wstart, len, s_utf8);
-        lua_pushstring(m_L, s_utf8);
-        #if 0
-            printf("getWords: %d>%d #%s#\n", wstart, wend, s_utf8);
-            lua_pushstring(m_L, ""); // prevent a dict lookup
-        #endif
-        free(s_utf8);
+        lua_pushinteger(m_L, wstart + 1); // Lua indices start at 1
+        lua_pushinteger(m_L, wend);
         free(breaks);
     }
 };
@@ -2066,7 +2261,7 @@ static int xtext_new(lua_State *L) {
 }
 
 XText * check_XText(lua_State * L, int n, bool replace_with_uservalue=true, bool error_if_no_longer_usable=true) {
-    // This checks that the thing at n on the stack is a correct XText 
+    // This checks that the thing at n on the stack is a correct XText
     // wrapping userdata (tagged with the "luaL_XText" metatable).
     XText * xt = *(XText **)luaL_checkudata(L, n, XTEXT_METATABLE_NAME);
     xt->m_L = L; // Replace previous m_L with this fresh one
@@ -2088,12 +2283,25 @@ XText * check_XText(lua_State * L, int n, bool replace_with_uservalue=true, bool
 static int xtext_hb_font_data_destroy(lua_State *L) {
     // printf("xtext_hb_font_data_destroy called\n");
     xtext_hb_font_data * hb_data = (xtext_hb_font_data *)luaL_checkudata(L, -1, XTEXT_HB_FONT_DATA_METATABLE_NAME);
+    FT_Face ft_face = hb_data->ft_size->face;
+    FT_Library ft_lib = (FT_Library)ft_face->generic.data;
+    int *refcount = (int *)hb_data->ft_size->generic.data;
+    assert(*refcount > 0);
+    if (!--*refcount) {
+        free(refcount);
+        FT_Done_Size(hb_data->ft_size);
+        FT_Done_Face(ft_face);
+        FT_Done_Library(ft_lib);
+    }
     hb_font_destroy(hb_data->hb_font);
+    FT_Done_Library(ft_lib);
     hb_buffer_destroy(hb_data->hb_buffer);
     if ( hb_data->hb_features )
         free(hb_data->hb_features);
+    hb_data->ft_size = NULL;
     hb_data->hb_font = NULL;
     hb_data->hb_buffer = NULL;
+    hb_data->hb_features = NULL;
     return 0;
 }
 
@@ -2180,8 +2388,19 @@ static int XText_makeLine(lua_State *L) {
     if (lua_isnumber(L,5)) {
         tabstop_width = luaL_checkint(L, 5);
     }
+    int expansion_pct_rather_than_hyphen = 0;
+    if (lua_isnumber(L,6)) {
+        // If text is going to be justified, we can avoid small hyphenated
+        // words by providing this non-zero. Ie, with 100:
+        // when about to wrap on a soft hyphen, if a wrap on a previous non-hyphen
+        // candidate would get justification to expand the spaces by less than 100%
+        // (so, at most double width spaces), consider this expansion admissible
+        // and better than this hyphen (which would probably make a small part
+        // of a word hyphenated at end of this line).
+        expansion_pct_rather_than_hyphen = luaL_checkint(L, 6);
+    }
     xt->measure();
-    xt->makeLine(start, width, no_line_breaking_rules, tabstop_width);
+    xt->makeLine(start, width, no_line_breaking_rules, tabstop_width, expansion_pct_rather_than_hyphen);
     // makeLine() will have pushed onto the stack a table suitable
     // to be added to TextBoxWidget.vertical_string_list
     return 1;
@@ -2211,7 +2430,7 @@ static int XText_shapeLine(lua_State *L) {
 
 // Get the paragraph direction of the paragraph the char at idx is part
 // of (and the one for the char at idx-1 too, as it might be useful).
-// To be used with empty lines for cursor positionning, to get
+// To be used with empty lines for cursor positioning, to get
 // line.para_is_rtl (similar to what shapeLine() returns, but
 // we can't call shapeLine() on empty lines).
 // If no idx provided, get the specified (or default) direction
@@ -2264,9 +2483,8 @@ static int XText_getText(lua_State *L) {
     return 1;
 }
 
-// Get (as a single UTF-8 string) the segment of m_text, extended to include
-// the full words that may be cut at boundaries (start, end).
-static int XText_getSelectedWords(lua_State *L) {
+// Get start and end indices of an extended segment of m_text that includes the full words that may be cut at boundaries (start, end).
+static int XText_getSelectedWordIndices(lua_State *L) {
     XText * xt = check_XText(L, 1);
     int start = luaL_checkint(L, 2);
     luaL_argcheck(L, start >= 1 && start <= xt->m_length, 2, "index out of range");
@@ -2279,9 +2497,9 @@ static int XText_getSelectedWords(lua_State *L) {
     // to inspect to find cut words' start/end.
     int context = luaL_checkint(L, 4);
     luaL_argcheck(L, context > 0, 3, "context must be strictly positive");
-    xt->getSelectedWords(start, end, context);
-    // getSelectedWords() will have pushed a Lua string onto the stack
-    return 1;
+    xt->getSelectedWordIndices(start, end, context);
+    // getSelectedWordIndices() will have pushed two Lua integers onto the stack
+    return 2;
 }
 
 
@@ -2306,7 +2524,7 @@ static const struct luaL_Reg xtext_meth[] = {
     {"getParaDirection", XText_getParaDirection},
     {"getSegmentFromEnd", XText_getSegmentFromEnd},
     {"getText", XText_getText},
-    {"getSelectedWords", XText_getSelectedWords},
+    {"getSelectedWordIndices", XText_getSelectedWordIndices},
     { "free", XText_free },
     { "__gc", XText_destroy },
     {NULL, NULL}

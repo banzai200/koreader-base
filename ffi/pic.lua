@@ -1,20 +1,5 @@
 local ffi = require("ffi")
 local BB = require("ffi/blitbuffer")
-local Png = require("ffi/png")
-
-local dummy = require("ffi/turbojpeg_h")
-local dummy = require("ffi/giflib_h")
-local turbojpeg, giflib
-if ffi.os == "Windows" then
-    turbojpeg = ffi.load("libs/libturbojpeg.dll")
-    giflib = ffi.load("libs/libgif-7.dll")
-elseif ffi.os == "OSX" then
-    turbojpeg = ffi.load("libs/libturbojpeg.dylib")
-    giflib = ffi.load("libs/libgif.7.dylib")
-else
-    turbojpeg = ffi.load("libs/libturbojpeg.so")
-    giflib = ffi.load("libs/libgif.so.7")
-end
 
 local Pic = {}
 
@@ -23,12 +8,14 @@ start of pic page type
 --]]
 local PicPage = {}
 
-function PicPage:new(o)
+function PicPage:extend(o)
     o = o or {}
     setmetatable(o, self)
     self.__index = self
     return o
 end
+-- Keep to our usual semantics (extend for class definitions, new for new instances)
+PicPage.new = PicPage.extend
 
 function PicPage:getSize(dc)
     local zoom = dc:getZoom()
@@ -42,7 +29,11 @@ end
 function PicPage:close()
 end
 
+--[[
+-- NOTE: This is a plain table, that won't work on Lua 5.1/LuaJIT
+--       Comment this out since this a currently a no-op anyway.
 PicPage.__gc = PicPage.close
+--]]
 
 function PicPage:draw(dc, bb)
     local scaled_bb = self.image_bb:scale(bb:getWidth(), bb:getHeight())
@@ -56,12 +47,13 @@ start of pic document
 --]]
 local PicDocument = {}
 
-function PicDocument:new(o)
+function PicDocument:extend(o)
     o = o or {}
     setmetatable(o, self)
     self.__index = self
     return o
 end
+PicDocument.new = PicDocument.extend
 
 function PicDocument:openPage()
     local page = PicPage:new{
@@ -99,10 +91,22 @@ function PicDocument:close()
     end
 end
 
+--[[
+-- NOTE: Ditto, plain table, and essentially a no-op since BlitBuffer already handles the cdata finalizer.
 PicDocument.__gc = PicDocument.close
+--]]
 
+--[[
+GIF handling (an animated GIF will make a document with multiple pages)
+--]]
+local giflib
+local ensure_giflib_loaded = function()
+    if giflib then return end
+    require("ffi/giflib_h")
+    giflib = ffi.loadlib("gif", "7")
+end
 
-local GifPage = PicPage:new()
+local GifPage = PicPage:extend{}
 function GifPage:close()
     -- with Gifs, the blitbuffers are per page
     if self.image_bb ~= nil then
@@ -111,7 +115,7 @@ function GifPage:close()
     end
 end
 
-local GifDocument = PicDocument:new{
+local GifDocument = PicDocument:extend{
     giffile = nil,
 }
 function GifDocument:getPages()
@@ -123,6 +127,7 @@ function GifDocument:getOriginalPageSize(number)
     return i.ImageDesc.Width, i.ImageDesc.Height, 4 -- components
 end
 function GifDocument:openPage(number)
+    ensure_giflib_loaded()
     -- If there are multiple frames (animated GIF), a standalone
     -- frame may not be enough (it may be smaller than the first frame,
     -- and have some transparency): we need to paste it (and all the
@@ -199,6 +204,7 @@ function GifDocument:openPage(number)
     return page
 end
 function GifDocument:close()
+    ensure_giflib_loaded()
     local err = ffi.new("int[1]")
     if giflib.DGifCloseFile(self.giffile, err) ~= giflib.GIF_OK then
         error(string.format("error closing/deallocating GIF: %s",
@@ -208,6 +214,7 @@ function GifDocument:close()
 end
 
 function Pic.openGIFDocument(filename)
+    ensure_giflib_loaded()
     local err = ffi.new("int[1]")
     local giffile = giflib.DGifOpenFileName(filename, err)
     if giffile == nil then
@@ -223,6 +230,7 @@ function Pic.openGIFDocument(filename)
 end
 
 function Pic.openGIFDocumentFromData(data, size)
+    ensure_giflib_loaded()
     -- Create GIF from data pointer (from https://github.com/luapower/giflib)
     local function data_reader(r_data, r_size)
         r_data = ffi.cast('unsigned char*', r_data)
@@ -253,6 +261,56 @@ function Pic.openGIFDocumentFromData(data, size)
     return GifDocument:new{giffile = giffile}
 end
 
+--[[
+WebP handling (an animated WebP will make a document with multiple pages)
+--]]
+local WebpPage = PicPage:extend{}
+function WebpPage:close()
+    -- with WebP, the blitbuffers are per page
+    if self.image_bb ~= nil then
+        self.image_bb:free()
+        self.image_bb = nil
+    end
+end
+
+local WebpDocument = PicDocument:extend{
+    webp = nil, -- ffi/webp instance
+}
+function WebpDocument:getPages()
+    return self.webp.nb_frames
+end
+function WebpDocument:getOriginalPageSize(number)
+    return self.webp.width, self.webp.height, self.webp.components
+end
+function WebpDocument:openPage(number)
+    local bb = self.webp:getFrameImage(number)
+    local page = WebpPage:new{
+        width = self.webp.width,
+        height = self.webp.height,
+        image_bb = bb,
+        doc = self,
+    }
+    return page
+end
+function WebpDocument:close()
+    self.webp:close()
+end
+
+function Pic.openWebPDocument(filename)
+    local WebP = require("ffi/webp")
+    local webp = WebP.fromFile(filename)
+    return WebpDocument:new{ webp = webp }
+end
+
+function Pic.openWebPDocumentFromData(data, size)
+    local WebP = require("ffi/webp")
+    local webp = WebP.fromData(data, size)
+    return WebpDocument:new{ webp = webp }
+end
+
+--[[
+PNG handling
+--]]
 function Pic.openPNGDocument(filename)
     local req_n
     local bbtype
@@ -264,6 +322,7 @@ function Pic.openPNGDocument(filename)
         req_n = 1
     end
 
+    local Png = require("ffi/png")
     local ok, re = Png.decodeFromFile(filename, req_n)
     if not ok then error(re) end
 
@@ -287,72 +346,28 @@ function Pic.openPNGDocument(filename)
     return doc
 end
 
+--[[
+JPG handling
+--]]
 function Pic.openJPGDocument(filename)
-    local fh = io.open(filename, "rb")
-    assert(fh, "couldn't open JPG file")
-    local data = fh:read("*a")
-    fh:close()
+    local Jpeg = require("ffi/jpeg")
+    local image, w, h, components = Jpeg.openDocument(filename, Pic.color)
 
-    local handle = turbojpeg.tjInitDecompress()
-    assert(handle, "no TurboJPEG API decompressor handle")
+    local doc = PicDocument:new{width=w, height=h}
+    doc.image_bb = image
+    doc.components = components
 
-    local width = ffi.new("int[1]")
-    local height = ffi.new("int[1]")
-    local jpegsubsamp = ffi.new("int[1]")
-
-    turbojpeg.tjDecompressHeader2(handle, ffi.cast("unsigned char*", data), #data, width, height, jpegsubsamp)
-    assert(width[0] > 0 and height[0] > 0, "image dimensions")
-
-    local doc = PicDocument:new{width=width[0], height=height[0]}
-    local format
-    if Pic.color then
-        doc.image_bb = BB.new(width[0], height[0], BB.TYPE_BBRGB24)
-        doc.components = 3
-        format = turbojpeg.TJPF_RGB
-    else
-        doc.image_bb = BB.new(width[0], height[0], BB.TYPE_BB8)
-        doc.components = 1
-        format = turbojpeg.TJPF_GRAY
-    end
-
-    if turbojpeg.tjDecompress2(handle, ffi.cast("unsigned char*", data), #data,
-        ffi.cast("unsigned char*", doc.image_bb.data),
-        width[0], doc.image_bb.pitch, height[0], format, 0) == -1 then
-        error("decoding JPEG file")
-    end
-
-    turbojpeg.tjDestroy(handle)
     return doc
 end
 
 function Pic.openJPGDocumentFromMem(data)
-    local handle = turbojpeg.tjInitDecompress()
-    assert(handle, "no TurboJPEG API decompressor handle")
+    local Jpeg = require("ffi/jpeg")
+    local image, w, h, components = Jpeg.openDocumentFromMem(data, Pic.color)
 
-    local width = ffi.new("int[1]")
-    local height = ffi.new("int[1]")
-    local jpegsubsamp = ffi.new("int[1]")
-    turbojpeg.tjDecompressHeader2(handle, ffi.cast("unsigned char*", data), #data, width, height, jpegsubsamp)
+    local doc = PicDocument:new{width=w, height=h}
+    doc.image_bb = image
+    doc.components = components
 
-    local doc = PicDocument:new{width=width[0], height=height[0]}
-    local format
-    if Pic.color then
-        doc.image_bb = BB.new(width[0], height[0], BB.TYPE_BBRGB24)
-        doc.components = 3
-        format = turbojpeg.TJPF_RGB
-    else
-        doc.image_bb = BB.new(width[0], height[0], BB.TYPE_BB8)
-        doc.components = 1
-        format = turbojpeg.TJPF_GRAY
-    end
-
-    if turbojpeg.tjDecompress2(handle, ffi.cast("unsigned char*", data), #data,
-        ffi.cast("unsigned char*", doc.image_bb.data),
-        width[0], doc.image_bb.pitch, height[0], format, 0) == -1 then
-        return false
-    end
-
-    turbojpeg.tjDestroy(handle)
     return doc
 end
 
@@ -367,6 +382,8 @@ function Pic.openDocument(filename)
         return Pic.openPNGDocument(filename)
     elseif extension == "gif" then
         return Pic.openGIFDocument(filename)
+    elseif extension == "webp" then
+        return Pic.openWebPDocument(filename)
     else
         error("Unsupported image format")
     end

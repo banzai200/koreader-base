@@ -1,3 +1,4 @@
+#define LODEPNG_NO_COMPILE_ANCILLARY_CHUNKS
 #include <lodepng.h>
 
 #include "ffi-cdecl.h"
@@ -16,8 +17,6 @@ cdecl_struct(LodePNGEncoderSettings)
 cdecl_type(LodePNGEncoderSettings)
 cdecl_struct(LodePNGColorMode)
 cdecl_type(LodePNGColorMode)
-cdecl_struct(LodePNGTime)
-cdecl_type(LodePNGTime)
 cdecl_struct(LodePNGInfo)
 cdecl_type(LodePNGInfo)
 cdecl_struct(LodePNGState)
@@ -30,6 +29,7 @@ cdecl_func(lodepng_decode24)
 cdecl_func(lodepng_decode_memory)
 cdecl_func(lodepng_decode_file)
 cdecl_func(lodepng_encode32_file)
+cdecl_func(lodepng_encode_file)
 cdecl_func(lodepng_state_init)
 cdecl_func(lodepng_state_cleanup)
 cdecl_func(lodepng_state_copy)

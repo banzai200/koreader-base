@@ -1,5 +1,6 @@
+-- Automatically generated with ffi-cdecl.
+
 local ffi = require("ffi")
-require("ffi/leptonica_h")
 
 ffi.cdef[[
 typedef struct {
@@ -8,6 +9,9 @@ typedef struct {
   float x1;
   float y1;
 } BBox;
+typedef struct Boxa BOXA;
+typedef struct Numa NUMA;
+typedef struct Pix PIX;
 typedef struct {
   double x;
   double y;
@@ -132,10 +136,10 @@ struct KOPTContext {
   int precache;
   int debug;
   int cjkchar;
-  BOXA* rboxa;
-  NUMA* rnai;
-  BOXA* nboxa;
-  NUMA* nnai;
+  BOXA *rboxa;
+  NUMA *rnai;
+  BOXA *nboxa;
+  NUMA *nnai;
   WRECTMAPS rectmaps;
   PAGEREGIONS pageregions;
   BBox bbox;
@@ -147,20 +151,18 @@ typedef struct KOPTContext KOPTContext;
 void bmp_init(WILLUSBITMAP *);
 void bmp_free(WILLUSBITMAP *);
 int bmp_alloc(WILLUSBITMAP *);
+int bmp_bytewidth(WILLUSBITMAP *);
 int bmp_copy(WILLUSBITMAP *, WILLUSBITMAP *);
-unsigned char *bmp_rowptr_from_top(WILLUSBITMAP *, int);
 void wrectmaps_init(WRECTMAPS *);
 void wrectmaps_free(WRECTMAPS *);
 int wrectmap_inside(WRECTMAP *, int, int);
 void k2pdfopt_get_reflowed_word_boxes(KOPTContext *, WILLUSBITMAP *, int, int, int, int);
 void k2pdfopt_get_native_word_boxes(KOPTContext *, WILLUSBITMAP *, int, int, int, int);
-void k2pdfopt_tocr_single_word(WILLUSBITMAP *, int, int, int, int, char *, int, char *, char *, int, int, int);
+int k2pdfopt_tocr_single_word(WILLUSBITMAP *, int, int, int, int, int, char *, int, char *, char *, int, int, int);
 void k2pdfopt_reflow_bmp(KOPTContext *);
 void k2pdfopt_tocr_end();
-void pageregions_init(PAGEREGIONS *);
-void pageregions_free(PAGEREGIONS *);
 void k2pdfopt_crop_bmp(KOPTContext *);
 void k2pdfopt_optimize_bmp(KOPTContext *);
 void pixmap_to_bmp(WILLUSBITMAP *, unsigned char *, int);
-PIX* bitmap2pix(WILLUSBITMAP *, int, int, int, int);
+PIX *bitmap2pix(WILLUSBITMAP *, int, int, int, int);
 ]]

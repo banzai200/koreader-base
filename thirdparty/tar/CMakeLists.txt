@@ -1,71 +1,61 @@
-project(tar)
-cmake_minimum_required(VERSION 3.5.1)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-#include("koreader_thirdparty_git")
-enable_language(C)
-
-assert_var_defined(CC)
-assert_var_defined(CFLAGS)
-assert_var_defined(LDFLAGS)
-assert_var_defined(LIBS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
+# O_PATH may be defined in our ToolChains, but older devices actually run kernels where it's not entirely usable...
+# (Usage in tar via gnulib's https://git.savannah.gnu.org/cgit/gnulib.git/log/lib/fchmodat.c)
+if(NOT EMULATE_READER)
+    list(APPEND PATCH_FILES tar-1.33-remove-o_path-usage.patch)
+endif()
 
 # The wordsplit changes introduced in 1.31 require glob.h, which is not present on Androdi before ABI 28 (c.f., #787)
-if(DEFINED ENV{ANDROID})
-    set(PATCH_CMD1 "${KO_PATCH} ${CMAKE_CURRENT_SOURCE_DIR}/tar-1.31-revert-wordsplit-for-android-glob.patch")
+if(ANDROID)
+    list(APPEND PATCH_FILES tar-1.31-revert-wordsplit-for-android-glob.patch)
 endif()
-#set(PATCH_CMD2 sh -c "touch ABOUT-NLS po/Makevars.template")
-#set(PATCH_CMD3 sh -c "AUTOPOINT=true ./bootstrap --skip-po")
 
+# list(APPEND PATCH_CMD COMMAND touch ABOUT-NLS po/Makevars.template)
+# list(APPEND PATCH_CMD COMMAND env AUTOPOINT=true ./bootstrap --skip-po)
+
+set(CPPFLAGS "-DHAVE_MKFIFO=1")
+
+if(ANDROID)
+    set(LIBS -static)
+elseif(APPLE OR WIN32)
+    set(LIBS)
+else()
+    set(LIBS -lrt)
+endif()
+
+list(APPEND CFG_CMD COMMAND env)
 # Avoid pulling > GLIBC_2.4 symbols on crappy platforms
-if(DEFINED ENV{LEGACY} OR DEFINED ENV{POCKETBOOK})
-	set(CFG_ENV_VAR "ac_cv_func_utimensat=no ac_cv_func_futimens=no")
+if(LEGACY OR POCKETBOOK)
+    list(APPEND CFG_CMD ac_cv_func_utimensat=no ac_cv_func_futimens=no)
+endif()
+append_autotools_vars(CFG_CMD)
+list(APPEND CFG_CMD
+    ${SOURCE_DIR}/configure --host=${CHOST}
+    --disable-acl
+    --disable-gcc-warnings
+    --disable-nls
+    --without-posix-acls
+    --without-xattrs
+)
+if(LEGACY OR POCKETBOOK)
+    list(APPEND CFG_CMD --disable-largefile)
 endif()
 
-set(CFG_ENV_VAR "${CFG_ENV_VAR} CC=\"${CC} -DHAVE_MKFIFO=1\" CFLAGS=\"${CFLAGS}\" LDFLAGS=\"${LDFLAGS}\"")
-set(CFG_OPTS "-q LIBS=\"${LIBS}\" --host=\"${CHOST}\"")
-
-if(DEFINED ENV{LEGACY} OR DEFINED ENV{POCKETBOOK})
-    set(CFG_OPTS "${CFG_OPTS} --disable-largefile")
-endif()
-set(CFG_CMD "${CFG_ENV_VAR} ${SOURCE_DIR}/configure --disable-nls --disable-gcc-warnings --disable-acl --without-xattrs --without-posix-acls ${CFG_OPTS}")
-
-if(DEFINED ENV{LEGACY} OR DEFINED ENV{POCKETBOOK})
+if(LEGACY OR POCKETBOOK)
     # Forcibly disable FORTIFY on legacy devices...
-    set(CFG_CMD "${CFG_CMD} && ${ISED} 's/# define _FORTIFY_SOURCE 2/#undef _FORTIFY_SOURCE/' config.h")
+    list(APPEND CFG_CMD COMMAND ${ISED} "s/# define _FORTIFY_SOURCE 2/#undef _FORTIFY_SOURCE/" config.h)
 endif()
-set(CFG_CMD sh -c "${CFG_CMD}")
 
-# We build in-tree...
-set(INSTALL_CMD1 ${CMAKE_COMMAND} -E rename ${BINARY_DIR}/src/tar ${BINARY_DIR}/tar)
-#set(INSTALL_CMD1 ${CMAKE_COMMAND} -E make_directory ${BINARY_DIR})
-#set(INSTALL_CMD2 ${CMAKE_COMMAND} -E rename ${SOURCE_DIR}/src/tar ${BINARY_DIR}/tar)
+list(APPEND BUILD_CMD COMMAND make)
 
-#ko_write_gitclone_script(
-#    GIT_CLONE_SCRIPT_FILENAME
-#    https://git.savannah.gnu.org/git/tar.git
-#    release_1_32
-#    ${SOURCE_DIR}
-#)
+append_binary_install_command(INSTALL_CMD src/tar)
 
-include(ExternalProject)
-set(TAR_VER "1.32")
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    URL http://ftpmirror.gnu.org/tar/tar-${TAR_VER}.tar.gz
-    URL_MD5 c8b1f4f1759ec8d5fccec20df5849431
-    DOWNLOAD_DIR ${KO_DOWNLOAD_DIR}
-    PATCH_COMMAND COMMAND ${PATCH_CMD1}
-    #DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    #BUILD_IN_SOURCE 1
-    #PATCH_COMMAND COMMAND ${PATCH_CMD1} COMMAND ${PATCH_CMD2} COMMAND ${PATCH_CMD3}
+external_project(
+    DOWNLOAD URL 9d5949e4c2d9665546ac65dafc0e726a
+    http://ftpmirror.gnu.org/tar/tar-1.34.tar.gz
+    https://ftp.wayne.edu/gnu/tar/tar-1.34.tar.gz
+    http://ftp.gnu.org/pub/gnu/tar/tar-1.34.tar.gz
+    PATCH_FILES ${PATCH_FILES}
     CONFIGURE_COMMAND ${CFG_CMD}
-    BUILD_COMMAND ${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS}
-    # The buildsystem outputs binaries in a subdirectory...
-    INSTALL_COMMAND COMMAND ${INSTALL_CMD1}
-    #INSTALL_COMMAND COMMAND ${INSTALL_CMD1} COMMAND ${INSTALL_CMD2}
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )

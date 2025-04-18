@@ -4,9 +4,10 @@ Module for various utility functions.
 @module ffi.util
 ]]
 
-local bit = require "bit"
-local ffi = require "ffi"
+local bit = require("bit")
+local ffi = require("ffi")
 local C = ffi.C
+local lfs = require("libs/libkoreader-lfs")
 
 local lshift = bit.lshift
 local band = bit.band
@@ -25,8 +26,8 @@ typedef LPSTR LPTSTR;
 typedef int BOOL;
 
 typedef struct _FILETIME {
-	DWORD dwLowDateTime;
-	DWORD dwHighDateTime;
+    DWORD dwLowDateTime;
+    DWORD dwHighDateTime;
 } FILETIME, *PFILETIME;
 
 void GetSystemTimeAsFileTime(FILETIME*);
@@ -63,7 +64,6 @@ require("ffi/posix_h")
 
 local util = {}
 
-
 if ffi.os == "Windows" then
     util.gettime = function()
         local ft = ffi.new('FILETIME[1]')[0]
@@ -97,6 +97,15 @@ else
     util.usleep = C.usleep
 end
 
+function util.getTimestamp()
+    local secs, usecs = util.gettime()
+    return secs + usecs/1000000
+end
+
+function util.getDuration(from_timestamp)
+    return util.getTimestamp() - from_timestamp
+end
+
 local statvfs = ffi.new("struct statvfs")
 function util.df(path)
     C.statvfs(path, statvfs)
@@ -104,14 +113,54 @@ function util.df(path)
         tonumber(statvfs.f_bfree * statvfs.f_bsize)
 end
 
+--- Wrapper for C.strcoll.
+-- string sort function respecting LC_COLLATE
+local function strcoll(str1, str2)
+    return C.strcoll(str1, str2) < 0
+end
+
+function util.strcoll(str1, str2)
+    -- lookup strcoll implementation on first use to avoid circular require
+    local strcoll_func = strcoll
+
+    -- Some devices lack compiled locales (Hi, Kobo!), preventing strcoll from behaving sanely. See issue koreader/koreader#686
+    if ffi.os == "Linux" and C.access("/usr/lib/locale/locale-archive", C.F_OK) ~= 0 then
+        strcoll_func = function(a, b)
+            return a < b
+        end
+    end
+
+    local DALPHA_SORT_CASE_INSENSITIVE = G_defaults:readSetting("DALPHA_SORT_CASE_INSENSITIVE")
+    -- patch real strcoll implementation
+    util.strcoll = function(a, b)
+        if a == nil and b == nil then
+            return false
+        elseif a == nil then
+            return true
+        elseif b == nil then
+            return false
+        elseif DALPHA_SORT_CASE_INSENSITIVE then
+            return strcoll_func(string.lower(a), string.lower(b))
+        else
+            return strcoll_func(a, b)
+        end
+    end
+
+    -- delegate to real strcoll implementation
+    return util.strcoll(str1, str2)
+end
+
 --- Wrapper for C.realpath.
-function util.realpath(path)
-    local buffer = ffi.new("char[?]", C.PATH_MAX)
-    if ffi.os == "Windows" then
+if ffi.os == "Windows" then
+    function util.realpath(path)
+        local buffer = ffi.new("char[?]", C.PATH_MAX)
         if C.GetFullPathNameA(path, C.PATH_MAX, buffer, nil) ~= 0 then
             return ffi.string(buffer)
         end
-    else
+    end
+else
+    function util.realpath(path)
+        local buffer = ffi.new("char[?]", C.PATH_MAX)
         if C.realpath(path, buffer) ~= nil then
             return ffi.string(buffer)
         end
@@ -119,42 +168,58 @@ function util.realpath(path)
 end
 
 --- Wrapper for C.basename.
-function util.basename(path)
-    local ptr = ffi.cast("uint8_t *", path)
-    if ffi.os == "Windows" then
+if ffi.os == "Windows" then
+    function util.basename(path)
+        local ptr = ffi.cast("uint8_t *", path)
         return ffi.string(C.PathFindFileNameA(ptr))
-    else
-        return ffi.string(C.basename(ptr))
+    end
+else
+    function util.basename(in_path)
+        -- NOTE: We dlsym the unprefixed symbol, because it's the only one Android provides.
+        --       That just so happens to be the GNU implementation on Linux + glibc,
+        --       but on other platforms, all bets are off as to whether this will pull a GNU-ish or POSIX-y implementation...
+        --       We need to be aware of the distinction, because strictly POSIX compliant implementations *will* modify input,
+        --       so, always make a copy to be safe.
+        -- NOTE: Moreover, the GNU implementation has a few potentially annoying quirks:
+        --       it returns an empty string when path has a trailing slash (as well as for "/").
+        --       So, we'll want to strip trailing slashes, too...
+        local stripped_path = in_path:match(".*[^/]") or "/" -- Ensure basename("/") leads to "/" as per SUSv2
+        local c_path = ffi.new("char[?]", #stripped_path + 1, stripped_path)
+        return ffi.string(C.basename(c_path))
     end
 end
 
 --- Wrapper for C.dirname.
-function util.dirname(in_path)
-    --[[
-    Both PathRemoveFileSpec and dirname will change original input string, so
-    we need to make a copy.
-    --]]
-    local path = ffi.new("char[?]", #in_path + 1)
-    ffi.copy(path, in_path)
-    local ptr = ffi.cast("uint8_t *", path)
-    if ffi.os == "Windows" then
-        if C.PathRemoveFileSpec(ptr) then
-            return ffi.string(ptr)
+if ffi.os == "Windows" then
+    function util.dirname(in_path)
+        --[[
+        Both PathRemoveFileSpec and dirname will change original input string,
+        so we need to make a copy.
+        --]]
+        local path = ffi.new("char[?]", #in_path + 1, in_path)
+        if C.PathRemoveFileSpec(path) then
+            return ffi.string(path)
         else
             return path
         end
-    else
-        return ffi.string(C.dirname(ptr))
+    end
+else
+    function util.dirname(in_path)
+        local path = ffi.new("char[?]", #in_path + 1, in_path)
+        return ffi.string(C.dirname(path))
     end
 end
 
 --- Copies file.
 function util.copyFile(from, to)
-    local ffp, err = io.open(from, "rb")
-    if err ~= nil then
-        return err
+    local ffp, ferr = io.open(from, "rb")
+    if not ffp then
+        return ferr
     end
-    local tfp = io.open(to, "wb")
+    local tfp, terr = io.open(to, "wb")
+    if not tfp then
+        return terr
+    end
     while true do
         local bytes = ffp:read(8192)
         if not bytes then
@@ -214,13 +279,23 @@ function util.execute(...)
     else
         local pid = C.fork()
         if pid == 0 then
-            local args = {...}
-            os.exit(C.execl(args[1], unpack(args, 1, #args+1)))
+            local args = table.pack(...)
+            os.exit(C.execl(args[1], unpack(args, 1, args.n+1))) -- Last arg must be a NULL pointer
         end
         local status = ffi.new('int[1]')
         C.waitpid(pid, status, 0)
         return status[0]
     end
+end
+
+-- Frontend can register functions to be run in all subprocesses
+-- just after the fork, ie. for some cleanup work.
+local _run_in_subprocess_after_fork_funcs = {}
+function util.addRunInSubProcessAfterForkFunc(id, func)
+    _run_in_subprocess_after_fork_funcs[id] = func
+end
+function util.removeRunInSubProcessAfterForkFunc(id)
+    _run_in_subprocess_after_fork_funcs[id] = nil
 end
 
 --- Run lua code (func) in a forked subprocess
@@ -238,20 +313,24 @@ end
 --                       This means you do NOT have to call isSubProcessDone on it.
 --                       It is safe to do so, though, it'll just immediately return success,
 --                       as waitpid will return -1 w/ an ECHILD errno.
+-- NOTE: Assumes the target platform is POSIX compliant.
 function util.runInSubProcess(func, with_pipe, double_fork)
     local parent_read_fd, child_write_fd
     if with_pipe then
         local pipe = ffi.new('int[2]', {-1, -1})
         if C.pipe(pipe) ~= 0 then -- failed creating pipe !
-            return false
+            return false, "failed creating pipe: "..ffi.string(C.strerror(ffi.errno()))
         end
         parent_read_fd, child_write_fd = pipe[0], pipe[1]
         if parent_read_fd == -1 or child_write_fd == -1 then
-            return false
+            return false, "failed getting pipe read or write fd: "..ffi.string(C.strerror(ffi.errno()))
         end
     end
     local pid = C.fork()
     if pid == 0 then -- child process
+        for _, f in pairs(_run_in_subprocess_after_fork_funcs) do
+            f()
+        end
         if double_fork then
             pid = C.fork()
             if pid ~= 0 then
@@ -277,6 +356,16 @@ function util.runInSubProcess(func, with_pipe, double_fork)
                 -- close our duplicate of parent fd
                 C.close(parent_read_fd)
             end
+
+            -- As the name imply, this is a non-interactive background task.
+            if ffi.os == "Linux" then
+                -- On Linux, schedule it accordingly.
+                local param = ffi.new("struct sched_param")
+                C.sched_setscheduler(0, C.SCHED_BATCH, param)
+            end
+            -- And nice it at lower priority, too (unlike the above call, this is POSIX).
+            C.setpriority(C.PRIO_PROCESS, 0, 5)
+
             -- Just run the provided lua code object in this new process,
             -- and exit immediatly (so we do not release drivers and
             -- resources still used by parent process)
@@ -293,7 +382,7 @@ function util.runInSubProcess(func, with_pipe, double_fork)
     end
     -- parent/main process
     if pid < 0 then -- on failure, fork() returns -1
-        return false
+        return false, "fork failed: "..ffi.string(C.strerror(ffi.errno()))
     end
     -- If we double-fork, reap the outer fork now, since its only purpose is fork -> _exit
     if double_fork then
@@ -301,7 +390,7 @@ function util.runInSubProcess(func, with_pipe, double_fork)
         local ret = C.waitpid(pid, status, 0)
         -- Returns pid on success, -1 on failure
         if ret < 0 then
-            return false
+            return false, "double fork failed: "..ffi.string(C.strerror(ffi.errno()))
         end
     end
     if child_write_fd then
@@ -312,11 +401,11 @@ function util.runInSubProcess(func, with_pipe, double_fork)
 end
 
 --- Collect subprocess so it does not become a zombie.
--- This does not block. Returns true if process was collected or was already
--- no more running, false if process is still running
-function util.isSubProcessDone(pid)
+-- This does not block, unless `wait` is `true`.
+-- Returns true if process was collected or has already exited, false if process is still running.
+function util.isSubProcessDone(pid, wait)
     local status = ffi.new('int[1]')
-    local ret = C.waitpid(pid, status, 1) -- 1 = WNOHANG : don't wait, just tell
+    local ret = C.waitpid(pid, status, wait and 0 or C.WNOHANG)
     -- status = tonumber(status[0])
     -- If still running: ret = 0 , status = 0
     -- If exited: ret = pid , status = 0 or 9 if killed
@@ -361,6 +450,7 @@ function util.getNonBlockingReadSize(fd_or_luafile)
     local available = ffi.new('int[1]')
     local ok = C.ioctl(fileno, C.FIONREAD, available)
     if ok ~= 0 then -- ioctl failed, not supported
+        print("C.ioctl(…, FIONREAD, …) failed:", ffi.string(C.strerror(ffi.errno())))
         return
     end
     available = tonumber(available[0])
@@ -386,6 +476,27 @@ function util.writeToFD(fd, data, close_fd)
     return success
 end
 
+--- Simple wrapper to write a string (will be coerced if not) to a file (mainly aimed at sysfs/procfs knobs).
+function util.writeToSysfs(val, file)
+    -- NOTE: We do things by hand via ffi, because io.write uses fwrite,
+    --       which isn't a great fit for procfs/sysfs (e.g., we lose failure cases like EBUSY,
+    --       as it only reports failures to write to the *stream*, not to the disk/file!).
+    local fd = C.open(file, bit.bor(C.O_WRONLY, C.O_CLOEXEC)) -- procfs/sysfs, we shouldn't need O_TRUNC
+    if fd == -1 then
+        print("Cannot open file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
+        return
+    end
+    val = tostring(val)
+    local bytes = #val
+    local nw = C.write(fd, val, bytes)
+    if nw == -1 then
+        print("Cannot write `" .. val .. "` to file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
+    end
+    C.close(fd)
+    -- NOTE: Allows the caller to possibly handle short writes (not that these should ever happen here).
+    return nw == bytes
+end
+
 --- Read all data from file descriptor, and close it.
 -- This blocks until remote side has closed its side of the fd
 function util.readAllFromFD(fd)
@@ -397,7 +508,7 @@ function util.readAllFromFD(fd)
         local bytes_read = tonumber(C.read(fd, ffi.cast('void*', buffer), chunksize))
         if bytes_read < 0 then
             local err = ffi.errno()
-            print("readFromFD() error: "..ffi.string(C.strerror(err)))
+            print("readAllFromFD() error: "..ffi.string(C.strerror(err)))
             break
         elseif bytes_read == 0 then -- EOF, no more data to read
             break
@@ -459,7 +570,7 @@ function util.fsyncDirectory(path)
             return false, err
         end
     end
-    local dirfd = C.open(ffi.cast("char *", path), C.O_RDONLY)
+    local dirfd = C.open(ffi.cast("char *", path), bit.bor(C.O_RDONLY, C.O_CLOEXEC))
     if dirfd == -1 then
         err = ffi.errno()
         return false, ffi.string(C.strerror(err))
@@ -516,26 +627,6 @@ function util.multiByteToUTF8(str, codepage)
     end
 end
 
-function util.ffiLoadCandidates(candidates)
-    local lib_loaded, lib
-
-    for _, candidate in ipairs(candidates) do
-        lib_loaded, lib = pcall(ffi.load, candidate)
-
-        if lib_loaded then
-            return lib
-        end
-    end
-
-    -- we failed, lib is the error message
-    return lib_loaded, lib
-end
-
---- Returns true if isWindows…
-function util.isWindows()
-    return ffi.os == "Windows"
-end
-
 local isAndroid = nil
 --- Returns true if Android.
 -- For now, we just check if the "android" module can be loaded.
@@ -546,34 +637,26 @@ function util.isAndroid()
     return isAndroid
 end
 
-local haveSDL2 = nil
-
---- Returns true if SDL2
-function util.haveSDL2()
-    local err
-
-    if haveSDL2 == nil then
-        haveSDL2, err = util.ffiLoadCandidates{
-            "SDL2",
-            -- this unfortunately needs to be written in full due to the . in the name
-            "libSDL2-2.0.so",
-            "libSDL2-2.0.so.0",
-        }
-    end
-    if not haveSDL2 then
-        print("SDL2 not loaded:", err)
-    end
-
-    return haveSDL2
+function util.isPocketbook()
+    return lfs.attributes("/ebrmain/pocketbook")
 end
 
-local isSDL = nil
---- Returns true if SDL
-function util.isSDL()
-    if isSDL == nil then
-        isSDL = util.haveSDL2()
+local libSDL2 = nil
+--- Returns SDL2 library
+function util.loadSDL2()
+    if libSDL2 == nil then
+        local ok
+        ok, libSDL2 = pcall(ffi.loadlib,
+            "SDL2-2.0", 0,
+            "SDL2-2.0", nil,
+            "SDL2", nil
+        )
+        if not ok then
+            print("SDL2 not loaded:", libSDL2)
+            libSDL2 = false
+        end
     end
-    return isSDL
+    return libSDL2 or nil
 end
 
 --- Division with integer result.
@@ -582,53 +665,56 @@ function util.idiv(a, b)
     return (q > 0) and math.floor(q) or math.ceil(q)
 end
 
---- Equivalent of the pairs() function on tables. Allows to iterate in order.
-function util.orderedPairs(t) return end
-do -- limits scope
-    local function __genOrderedIndex( t )
-    -- this function is taken from http://lua-users.org/wiki/SortedIteration
-        local orderedIndex = {}
-        for key in pairs(t) do
-            table.insert( orderedIndex, key )
-        end
-        table.sort( orderedIndex )
-        return orderedIndex
+-- pairs(), but with *keys* sorted alphabetically.
+-- c.f., http://lua-users.org/wiki/SortedIteration
+-- See also http://lua-users.org/wiki/SortedIterationSimple
+local function __genOrderedIndex(t)
+    local orderedIndex = {}
+    for key in pairs(t) do
+        table.insert(orderedIndex, key)
     end
-
-    local function orderedNext(t, state)
-        -- this function is taken from http://lua-users.org/wiki/SortedIteration
-        -- Equivalent of the next function, but returns the keys in the alphabetic
-        -- order. We use a temporary ordered key table that is stored in the
-        -- table being iterated.
-        local key
-        if state == nil then
-            -- the first time, generate the index
-            t.__orderedIndex = __genOrderedIndex( t )
-            key = t.__orderedIndex[1]
-            return key, t[key]
+    table.sort(orderedIndex, function(v1, v2)
+        if type(v1) == type(v2) then
+            -- Assumes said type supports the < comparison operator
+            return v1 < v2
+        else
+            -- Handle type mismatches by squashing to string
+            return tostring(v1) < tostring(v2)
         end
+    end)
+    return orderedIndex
+end
+
+local function orderedNext(t, state)
+    -- Equivalent of the next function, but returns the keys in the alphabetic order.
+    -- We use a temporary ordered key table that is stored in the table being iterated.
+
+    local key = nil
+    -- print("orderedNext: state = "..tostring(state))
+    if state == nil then
+        -- the first time, generate the index
+        t.__orderedIndex = __genOrderedIndex(t)
+        key = t.__orderedIndex[1]
+    else
         -- fetch the next value
-        for i = 1,table.getn(t.__orderedIndex) do
+        for i = 1, #t.__orderedIndex do
             if t.__orderedIndex[i] == state then
                 key = t.__orderedIndex[i+1]
             end
         end
-
-        if key then
-            return key, t[key]
-        end
-
-        -- no more value to return, cleanup
-        t.__orderedIndex = nil
-        return
     end
 
-    function util.orderedPairs(t)
-        -- this function is taken from http://lua-users.org/wiki/SortedIteration
-        -- Equivalent of the pairs() function on tables. Allows to iterate
-        -- in order
-        return orderedNext, t, nil
+    if key then
+        return key, t[key]
     end
+
+    -- no more value to return, cleanup
+    t.__orderedIndex = nil
+end
+
+function util.orderedPairs(t)
+    -- Equivalent of the pairs() function on tables. Allows to iterate in order
+    return orderedNext, t, nil
 end
 
 --[[--
@@ -648,14 +734,23 @@ This function was inspired by Qt:
 <http://qt-project.org/doc/qt-4.8/internationalization.html#use-qstring-arg-for-dynamic-text>
 --]]
 function util.template(str, ...)
-    local params = {...}
+    local params = table.pack(...)
     -- shortcut:
-    if #params == 0 then return str end
+    if params.n == 0 then return str end
     local result = string.gsub(str, "%%([1-9][0-9]?)",
         function(i)
             return params[tonumber(i)]
         end)
     return result
+end
+
+-- Check if `path` is an executable file.
+function util.isExecutable(path)
+    local attributes, err = lfs.attributes(path)
+    if not attributes or err ~= nil then
+        return false, err
+    end
+    return attributes.mode == "file" and C.access(path, C.X_OK + C.R_OK) == 0
 end
 
 return util

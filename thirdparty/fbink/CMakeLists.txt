@@ -1,69 +1,63 @@
-project(fbink)
-cmake_minimum_required(VERSION 3.5.1)
+set(TOOL ${PROJECT_NAME})
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/../cmake_modules")
-include("koreader_thirdparty_common")
-include("koreader_thirdparty_git")
-
-enable_language(C)
-
-assert_var_defined(CFLAGS)
-assert_var_defined(LDFLAGS)
-
-ep_get_source_dir(SOURCE_DIR)
-ep_get_binary_dir(BINARY_DIR)
+# Build in source tree.
+set(BINARY_DIR ${SOURCE_DIR})
 
 # Choose your own adventure!
-if($ENV{LEGACY})
-    set(FBINK_TARGET "legacy")
-elseif($ENV{KINDLE})
-    set(FBINK_TARGET "kindle")
-elseif($ENV{CERVANTES})
-    set(FBINK_TARGET "cervantes")
-elseif($ENV{KOBO})
-    set(FBINK_TARGET "strip")
-    set(UTILS_TARGET "utils KOBO=1")
-elseif($ENV{REMARKABLE})
-    set(FBINK_TARGET "remarkable")
-    set(UTILS_TARGET "utils REMARKABLE=1")
+set(FBDEPTH_TARGET fbdepth)
+if(LEGACY)
+    set(FBINK_TARGET legacy)
+    set(INPUT_TARGET inputlib KINDLE=1 LEGACY=1)
+elseif(KINDLE)
+    set(FBINK_TARGET kindle)
+    set(INPUT_TARGET inputlib KINDLE=1)
+elseif(CERVANTES)
+    set(FBINK_TARGET cervantes)
+    set(INPUT_TARGET inputlib CERVANTES=1)
+elseif(KOBO)
+    set(FBINK_TARGET strip KOBO=1)
+    set(FBDEPTH_TARGET fbdepth KOBO=1)
+    set(INPUT_TARGET inputlib KOBO=1)
+elseif(REMARKABLE)
+    set(FBINK_TARGET remarkable)
+    set(FBDEPTH_TARGET fbdepth REMARKABLE=1)
+    set(INPUT_TARGET inputlib REMARKABLE=1)
+elseif(POCKETBOOK)
+    set(FBINK_TARGET pocketbook)
+    set(FBDEPTH_TARGET fbdepth POCKETBOOK=1)
+    set(INPUT_TARGET inputlib POCKETBOOK=1)
 else()
-    set(FBINK_TARGET "strip")
+    set(FBINK_TARGET strip)
+    # Would technically run just fine on plain Linux...
+    #set(INPUT_TARGET inputlib LINUX=1)
 endif()
 
-# Minimal-ish, statically linked build, we don't care about image support
-set(BUILD_CMD1 sh -c "${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} MINIMAL=1 FONTS=1 OPENTYPE=1 CFLAGS=\"${CFLAGS}\" LDFLAGS=\"${LDFLAGS}\" ${FBINK_TARGET}")
-if(UTILS_TARGET)
-    set(BUILD_CMD2 sh -c "${KO_MAKE_RECURSIVE} -j${PARALLEL_JOBS} CFLAGS=\"${CFLAGS}\" LDFLAGS=\"${LDFLAGS}\" ${UTILS_TARGET}")
-endif()
-# We build in-tree...
-set(INSTALL_CMD1 ${CMAKE_COMMAND} -E make_directory ${BINARY_DIR})
-if($ENV{DEBUG})
-    set(INSTALL_CMD2 ${CMAKE_COMMAND} -E rename ${SOURCE_DIR}/Debug/fbink ${BINARY_DIR}/fbink)
-    if(UTILS_TARGET)
-        set(INSTALL_CMD3 ${CMAKE_COMMAND} -E rename ${SOURCE_DIR}/Debug/fbdepth ${BINARY_DIR}/fbdepth)
-    endif()
+list(APPEND BUILD_CMD COMMAND make CROSS_TC=${CHOST})
+append_autotools_vars(BUILD_CMD)
+
+if(TOOL STREQUAL "fbdepth")
+    list(APPEND BUILD_CMD ${FBDEPTH_TARGET})
+    append_binary_install_command(INSTALL_CMD ${CMAKE_BUILD_TYPE}/fbdepth)
+elseif(TOOL STREQUAL "fbink")
+    list(APPEND BUILD_CMD
+        # Minimal-ish, statically linked build,
+        # we don't care about image support.
+        FONTS=1
+        MINIMAL=1
+        OPENTYPE=1
+        ${FBINK_TARGET}
+    )
+    append_binary_install_command(INSTALL_CMD ${CMAKE_BUILD_TYPE}/fbink)
+elseif(TOOL STREQUAL "libfbink_input")
+    list(APPEND BUILD_CMD ${INPUT_TARGET})
+    append_binary_install_command(INSTALL_CMD ${CMAKE_BUILD_TYPE}/libfbink_input.so.1 DESTINATION libs)
 else()
-    set(INSTALL_CMD2 ${CMAKE_COMMAND} -E rename ${SOURCE_DIR}/Release/fbink ${BINARY_DIR}/fbink)
-    if(UTILS_TARGET)
-        set(INSTALL_CMD3 ${CMAKE_COMMAND} -E rename ${SOURCE_DIR}/Release/fbdepth ${BINARY_DIR}/fbdepth)
-    endif()
+    message(FATAL_ERROR "TOOL not set or unsupported: '${TOOL}'")
 endif()
 
-ko_write_gitclone_script(
-    GIT_CLONE_SCRIPT_FILENAME
+external_project(
+    DOWNLOAD GIT ab4501820bde0fafc1b2c6d74b9c576a49d2eadd
     https://github.com/NiLuJe/FBInk.git
-    tags/v1.22.0
-    ${SOURCE_DIR}
-)
-
-include(ExternalProject)
-ExternalProject_Add(
-    ${PROJECT_NAME}
-    DOWNLOAD_COMMAND ${CMAKE_COMMAND} -P ${GIT_CLONE_SCRIPT_FILENAME}
-    BUILD_IN_SOURCE 1
-    PATCH_COMMAND ""
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND COMMAND ${BUILD_CMD1} COMMAND ${BUILD_CMD2}
-    # The buildsystem outputs binaries in a subdirectory...
-    INSTALL_COMMAND COMMAND ${INSTALL_CMD1} COMMAND ${INSTALL_CMD2} COMMAND ${INSTALL_CMD3}
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ${INSTALL_CMD}
 )
