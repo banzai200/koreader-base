@@ -49,6 +49,9 @@ local framebuffer = {
 
     -- CFA post-processing flag
     CFA_PROCESSING_FLAG = 0,
+
+    -- Bookeen readers use a separate device for controlling the display
+    disp_fd = nil,
 }
 
 --[[ refresh list management: --]]
@@ -231,6 +234,17 @@ local function cervantes_mxc_wait_for_update_complete(fb, marker)
     fb.marker_data[0] = marker
 
     return C.ioctl(fb.fd, C.MXCFB_WAIT_FOR_UPDATE_COMPLETE, fb.marker_data)
+end
+
+
+local function bookeen_mxc_wait_for_update_complete(fb)
+    local upd = ffi.new("struct mxcfb_update_data_bookeen[1]")
+    upd[0].u0 = 0
+    -- This is what the built-in reader does...
+    while C.ioctl(fb.disp_fd, C.DISP_EINK_GET_UPDATE_STATUS, upd) ~= 0 do
+        C.usleep(10)
+    end
+    return 0
 end
 
 -- Kindle's MXCFB_WAIT_FOR_UPDATE_COMPLETE == 0xc008462f
@@ -774,6 +788,39 @@ local function refresh_cervantes(fb, is_flashing, waveform_mode, x, y, w, h)
 end
 
 
+local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
+    local bb = fb.full_bb or fb.bb
+    w, x = BB.checkBounds(w or bb:getWidth(), x or 0, 0, bb:getWidth(), 0xFFFF)
+    h, y = BB.checkBounds(h or bb:getHeight(), y or 0, 0, bb:getHeight(), 0xFFFF)
+    x, y, w, h = bb:getPhysicalRect(x, y, w, h)
+
+    if w <= 1 or h <= 1 then
+        return
+    end
+
+    local refarea = ffi.new("struct mxcfb_update_data_bookeen[1]")
+    refarea[0].u0 = 0
+    refarea[0].u1 = fb.fd
+    refarea[0].u2 = waveform_mode or C.EINK_GC16_MODE
+    refarea[0].update_region.x_start = x;
+    refarea[0].update_region.x_end   = x + w;
+    refarea[0].update_region.y_start = y;
+    refarea[0].update_region.y_end   = y + h;
+
+    rv = C.ioctl(fb.disp_fd, C.MXCFB_SEND_UPDATE, refarea)
+    if rv < 0 then
+        local err = ffi.errno()
+        fb.debug("MXCFB_SEND_UPDATE ioctl failed:", ffi.string(C.strerror(err)))
+        return
+    end
+
+    if refreshtype == C.UPDATE_MODE_FULL then
+        bookeen_mxc_wait_for_update_complete(fb)
+    end
+
+    return
+end
+
 --[[ framebuffer API ]]--
 
 function framebuffer:refreshPartialImp(x, y, w, h, dither)
@@ -1199,6 +1246,31 @@ function framebuffer:init()
         self.update_data = ffi.new("struct mxcfb_update_data")
         self.update_data.temp = C.TEMP_USE_AMBIENT
         self.marker_data = ffi.new("uint32_t[1]")
+    elseif self.device:isBookeen() then
+        require("ffi/mxcfb_bookeen_h")
+
+        self.disp_fd = C.open("/dev/disp", C.O_RDWR)
+        assert(self.disp_fd ~= -1, "cannot open display!")
+
+        self.mech_refresh = refresh_bookeen
+        self.mech_wait_update_complete = bookeen_mxc_wait_for_update_complete
+
+        self.waveform_fast = C.EINK_DU_MODE
+        self.waveform_ui = bor(C.EINK_GC16_MODE, C.EINK_LOCAL_MODE)
+        self.waveform_flashui = C.EINK_GC16_MODE
+        self.waveform_full = C.EINK_GC16_MODE
+        self.waveform_partial = bor(C.EINK_GC16_MODE, C.EINK_LOCAL_MODE)
+        self.waveform_night = C.EINK_GC16_MODE
+        self.waveform_flashnight = self.waveform_night
+        self.night_is_reagl = false
+
+        -- Keep our data structures around, and setup constants
+        self.update_data = ffi.new("struct mxcfb_update_data")
+        -- NOTE: We update temp at runtime on PB
+        self.marker_data = ffi.new("struct mxcfb_update_marker_data")
+        -- NOTE: 0 seems to be a fairly safe assumption for "we don't care about collisions".
+        --       On a slightly related note, the EPDC_FLAG_TEST_COLLISION flag is for dry-run collision tests, never set it.
+        self.marker_data.collision_test = 0
     else
         error("unknown device type")
     end
