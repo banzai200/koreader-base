@@ -1,8 +1,8 @@
 list(APPEND PATCH_FILES
-    k2pdfopt.patch
     cmake_tweaks.patch
-    fix-old-tc-build.patch
+    k2pdfopt.patch
     no_debug_fonts.patch
+    trim_the_fat.patch
 )
 
 list(APPEND CMAKE_ARGS
@@ -13,6 +13,9 @@ list(APPEND CMAKE_ARGS
     -DDISABLE_ARCHIVE=TRUE
     -DDISABLE_CURL=TRUE
     -DDISABLE_TIFF=TRUE
+    -DENABLE_CCACHE=FALSE
+    -DENABLE_NINJA_POOL=FALSE
+    -DENABLE_PRECOMPILED_HEADERS=FALSE
     -DGRAPHICS_DISABLED=TRUE
     -DINSTALL_CONFIGS=FALSE
 )
@@ -22,8 +25,8 @@ list(APPEND BUILD_CMD COMMAND ninja)
 list(APPEND INSTALL_CMD COMMAND ${CMAKE_COMMAND} --install .)
 
 external_project(
-    DOWNLOAD URL 17a6d7b78793ff587686449b29d51894
-    https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.0.tar.gz
+    DOWNLOAD URL 561b6b104238fffa1d00362ac72ea397
+    https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.3.tar.gz
     PATCH_FILES ${PATCH_FILES}
     CMAKE_ARGS ${CMAKE_ARGS}
     BUILD_COMMAND ${BUILD_CMD}

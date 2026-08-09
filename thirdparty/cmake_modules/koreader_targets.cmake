@@ -103,7 +103,7 @@ declare_koreader_target(
 # koreader-djvu
 declare_koreader_target(
     koreader-djvu TYPE monolibtic
-    DEPENDS djvulibre::djvulibre libk2pdfopt::k2pdfopt luajit::luajit
+    DEPENDS blitbuffer djvulibre::djvulibre libk2pdfopt::k2pdfopt luajit::luajit
     SOURCES djvu.c
     SUFFIX .so
     VISIBILITY hidden
@@ -135,40 +135,6 @@ function(setup_koreader_input)
             target_compile_definitions(koreader-input PRIVATE -D${PLATFORM})
         endif()
     endforeach()
-endfunction()
-
-# koreader-lfs
-declare_koreader_target(
-    koreader-lfs TYPE monolibtic
-    DEPENDS luajit::luajit
-    SOURCES lfs.c lfs.h
-    VISIBILITY hidden
-)
-function(setup_koreader_lfs)
-    # Ensure only the right symbols are exported.
-    add_custom_command(
-        COMMAND
-        patch -p1
-        --directory=${CMAKE_SOURCE_DIR}/luafilesystem
-        --input=${CMAKE_SOURCE_DIR}/patches/lfs-visibility.patch
-        --output=${CMAKE_BINARY_DIR}/lfs.h
-        OUTPUT lfs.h
-        DEPENDS ${CMAKE_SOURCE_DIR}/patches/lfs-visibility.patch
-        MAIN_DEPENDENCY ${CMAKE_SOURCE_DIR}/luafilesystem/src/lfs.h
-    )
-    # Avoid precision loss on 32-bit arches (LFS is always built w/ LARGEFILE
-    # support, but lua_Integer is always a ptrdiff_t, which is not wide enough).
-    add_custom_command(
-        COMMAND
-        patch -p1
-        --directory=${CMAKE_SOURCE_DIR}/luafilesystem
-        --input=${CMAKE_SOURCE_DIR}/patches/lfs-pushnumber-for-wide-types.patch
-        --output=${CMAKE_BINARY_DIR}/lfs.c
-        OUTPUT lfs.c
-        DEPENDS ${CMAKE_SOURCE_DIR}/patches/lfs-pushnumber-for-wide-types.patch
-        MAIN_DEPENDENCY ${CMAKE_SOURCE_DIR}/luafilesystem/src/lfs.c
-    )
-    set_target_properties(koreader-lfs PROPERTIES SUFFIX .so)
 endfunction()
 
 # koreader-nnsvg
@@ -214,21 +180,6 @@ declare_koreader_target(
     SOURCES extr.c
 )
 
-# libXss
-if(APPIMAGE)
-    set(EXCLUDE_FROM_ALL)
-else()
-    set(EXCLUDE_FROM_ALL EXCLUDE_FROM_ALL)
-endif()
-declare_koreader_target(
-    Xss TYPE library
-    ${EXCLUDE_FROM_ALL}
-    SOURCES libxss-dummy.c
-)
-function(setup_Xss)
-    set_target_properties(Xss PROPERTIES SOVERSION 1)
-endfunction()
-
 # koreader
 if(APPLE)
     set(EXCLUDE_FROM_ALL)
@@ -253,7 +204,7 @@ else()
 endif()
 declare_koreader_target(
     inkview-compat TYPE library
-    DEPENDS inkview pthread
+    DEPENDS inkview::inkview_517 pthread
     ${EXCLUDE_FROM_ALL}
     SOURCES input/inkview-compat.c
 )
@@ -270,6 +221,19 @@ declare_koreader_target(
     SOURCES button-listen.c
 )
 
+# unpack
+if(NOT (ANDROID OR APPLE OR EMULATE_READER))
+    set(EXCLUDE_FROM_ALL)
+else()
+    set(EXCLUDE_FROM_ALL EXCLUDE_FROM_ALL)
+endif()
+declare_koreader_target(
+    unpack TYPE executable
+    DEPENDS libarchive::libarchive_static xz::lzma_static zlib::z_static zstd::zstd_static m
+    ${EXCLUDE_FROM_ALL}
+    SOURCES unpack.c
+)
+
 # }}}
 
 # MONOLIBTIC. {{{
@@ -282,18 +246,26 @@ if(MONOLIBTIC)
             list(APPEND DEPENDS ${NAME} ${${NAME}_DEPENDS})
         endif()
     endforeach()
+    if(ANDROID AND IS_DIRECTORY "${ANDROID_LAUNCHER_DIR}")
+        list(APPEND DEPENDS android-luajit-launcher::7z)
+    endif()
     if(KINDLE)
         list(APPEND DEPENDS openlipclua::libopenlipclua)
+    endif()
+    if(NOT (APPLE OR EMULATE_READER))
+        list(APPEND DEPENDS xz::lzma_static)
     endif()
     declare_koreader_target(
         koreader-monolibtic TYPE library
         DEPENDS ${DEPENDS}
         # We still need to manually add some transitive dependencies because
         # CMake is shit at handling mutiple level of static libraries.
+        libarchive::libarchive
         czmq::czmq
         freetype2::freetype
         giflib::gif
         harfbuzz::harfbuzz
+        koreader-lfs::koreader-lfs
         leptonica::leptonica
         libjpeg-turbo::turbojpeg
         libk2pdfopt::k2pdfopt
@@ -310,6 +282,7 @@ if(MONOLIBTIC)
         pthread
         sqlite::sqlite3
         turbo::tffi_wrap
+        xxhash::xxhash
         zlib::z
         zstd::zstd
         SOURCES monolibtic.cpp
@@ -323,7 +296,7 @@ if(MONOLIBTIC)
             # there's no way to tell CMake to add the necessary `-Wl,--end-group` at
             # the end of the line, **after** the libraries. (Proper support is only
             # available from 3.24 onward).
-            target_link_options(koreader-monolibtic PRIVATE -Wl,-Bsymbolic,--gc-sections,--start-group)
+            target_link_options(koreader-monolibtic PRIVATE -Wl,-Bsymbolic,--start-group)
         endif()
         set(CDECLS)
         foreach(NAME IN LISTS KOREADER_TARGETS)
@@ -331,8 +304,14 @@ if(MONOLIBTIC)
                 list(APPEND CDECLS ${NAME}_cdecl)
             endif()
         endforeach()
+        if(ANDROID AND IS_DIRECTORY "${ANDROID_LAUNCHER_DIR}")
+            list(APPEND CDECLS android-luajit-launcher_cdecl)
+        endif()
         if(KINDLE)
             list(APPEND CDECLS openlipclua_cdecl)
+        endif()
+        if(NOT (APPLE OR EMULATE_READER))
+            list(APPEND CDECLS xz_cdecl)
         endif()
         target_exports(koreader-monolibtic CDECLS ${CDECLS}
             crypto_decl
@@ -340,7 +319,9 @@ if(MONOLIBTIC)
             giflib_decl
             harfbuzz_cdecl
             koptcontext_cdecl
+            koreader-lfs_cdecl
             leptonica_cdecl
+            libarchive_cdecl
             libwebp_decl
             lodepng_decl
             lpeg_cdecl
@@ -351,6 +332,7 @@ if(MONOLIBTIC)
             tffi_wrap_cdecl
             turbojpeg_decl
             utf8proc_decl
+            xxhash_cdecl
             zeromq_cdecl
             zlib_decl
             zstd_decl

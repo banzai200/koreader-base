@@ -30,14 +30,15 @@ function(declare_dependency NAME)
     add_library(${NAME} ALIAS ${TGT})
 endfunction()
 
+# android-luajit-launcher
+declare_dependency(android-luajit-launcher::7z MONOLIBTIC 7z LIBRARIES android log)
+
 # crengine
 declare_dependency(crengine::crengine)
 target_link_libraries(
     _crengine__crengine
     INTERFACE
     ${OUTPUT_DIR}/thirdparty/crengine/build/libcrengine.a
-    ${OUTPUT_DIR}/thirdparty/crengine/build/crengine/thirdparty/antiword/libantiword.a
-    ${OUTPUT_DIR}/thirdparty/crengine/build/crengine/thirdparty/chmlib/libchmlib.a
     freetype2::freetype
     harfbuzz::harfbuzz
     libunibreak::unibreak
@@ -49,11 +50,11 @@ target_link_libraries(
     md4c::html
     srell::srell
     utf8proc::utf8proc
+    xxhash::xxhash
     zlib::z
     zstd::zstd
 )
-target_compile_options(_crengine__crengine INTERFACE -include ${OUTPUT_DIR}/thirdparty/crengine/build/crsetup.h)
-target_include_directories(_crengine__crengine INTERFACE ${THIRDPARTY_DIR}/kpvcrlib/crengine/crengine/include)
+target_include_directories(_crengine__crengine INTERFACE ${OUTPUT_DIR}/thirdparty/crengine/build ${THIRDPARTY_DIR}/kpvcrlib/crengine/crengine/include)
 
 # czmq
 set(LIBRARIES)
@@ -63,14 +64,17 @@ endif()
 declare_dependency(czmq::czmq MONOLIBTIC czmq zmq LIBRARIES ${LIBRARIES})
 
 # djvulibre
-set(LIBRARIES m pthread stdc++)
+set(LIBRARIES m pthread)
+if(NOT (ANDROID AND MONOLIBTIC))
+    list(APPEND LIBRARIES stdc++)
+endif()
 if(APPLE)
     list(APPEND LIBRARIES "-framework CoreFoundation")
 endif()
 declare_dependency(djvulibre::djvulibre MONOLIBTIC jpeg STATIC djvulibre LIBRARIES ${LIBRARIES})
 
 # freetype
-declare_dependency(freetype2::freetype INCLUDES freetype2 MONOLIBTIC freetype)
+declare_dependency(freetype2::freetype INCLUDES freetype2 MONOLIBTIC freetype STATIC brotlicommon brotlidec)
 
 # fribidi
 declare_dependency(fribidi::fribidi INCLUDES fribidi MONOLIBTIC fribidi)
@@ -80,6 +84,18 @@ declare_dependency(giflib::gif MONOLIBTIC gif)
 
 # harfbuzz
 declare_dependency(harfbuzz::harfbuzz INCLUDES freetype2 harfbuzz MONOLIBTIC harfbuzz)
+
+# inkview
+declare_dependency(inkview::inkview_517)
+target_include_directories(_inkview__inkview_517 INTERFACE ${INKVIEW_DIR}/517)
+target_link_libraries(_inkview__inkview_517 INTERFACE ${INKVIEW_DIR}/517/libinkview.so)
+
+# koreader-lfs
+declare_dependency(koreader-lfs::koreader-lfs MONOLIBTIC koreader-lfs)
+
+# libarchive
+declare_dependency(libarchive::libarchive MONOLIBTIC archive)
+declare_dependency(libarchive::libarchive_static STATIC archive)
 
 # leptonica
 declare_dependency(leptonica::leptonica INCLUDES leptonica MONOLIBTIC leptonica)
@@ -153,6 +169,7 @@ else()
     set(LUAJIT_LIB)
 endif()
 get_target_property(LUAJIT_INC luajit::luajit INTERFACE_INCLUDE_DIRECTORIES)
+declare_dependency(luajit::luajit_static INCLUDES luajit-2.1 STATIC luajit-5.1 LIBRARIES dl m)
 
 # luasec
 if(MONOLIBTIC)
@@ -173,15 +190,20 @@ declare_dependency(lunasvg::lunasvg MONOLIBTIC lunasvg)
 declare_dependency(md4c::html STATIC md4c-html md4c)
 
 # mupdf
-set(LIBRARIES m)
+set(STATIC_LIBS mupdf mupdf-third aes)
+set(SYS_LIBS m)
 if(ANDROID)
-    list(APPEND LIBRARIES log)
+    list(APPEND SYS_LIBS log)
+endif()
+set(MONO_LIBS archive freetype harfbuzz jpeg webp webpdemux z)
+if(NOT (APPLE OR EMULATE_READER))
+    list(APPEND STATIC_LIBS lzma)
 endif()
 declare_dependency(
     mupdf::mupdf
-    MONOLIBTIC freetype harfbuzz jpeg webp webpdemux z
-    STATIC mupdf mupdf-third aes
-    LIBRARIES ${LIBRARIES}
+    MONOLIBTIC ${MONO_LIBS}
+    STATIC ${STATIC_LIBS}
+    LIBRARIES ${SYS_LIBS}
 )
 
 # openlipclua
@@ -208,9 +230,7 @@ target_link_libraries(pthread INTERFACE Threads::Threads)
 declare_dependency(sqlite::sqlite3 MONOLIBTIC sqlite3)
 
 # srell
-add_library(srell INTERFACE)
-target_include_directories(srell INTERFACE ${THIRDPARTY_DIR}/srell)
-add_library(srell::srell ALIAS srell)
+declare_dependency(srell::srell)
 
 # turbo
 if(MONOLIBTIC)
@@ -220,8 +240,16 @@ endif()
 # utf8proc
 declare_dependency(utf8proc::utf8proc MONOLIBTIC utf8proc)
 
+# xxhash
+declare_dependency(xxhash::xxhash MONOLIBTIC xxhash)
+
+# xz
+declare_dependency(xz::lzma_static STATIC lzma)
+
 # zlib
 declare_dependency(zlib::z MONOLIBTIC z)
+declare_dependency(zlib::z_static STATIC z)
 
 # zstd
 declare_dependency(zstd::zstd MONOLIBTIC zstd)
+declare_dependency(zstd::zstd_static STATIC zstd)

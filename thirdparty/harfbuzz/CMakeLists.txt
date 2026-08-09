@@ -1,7 +1,4 @@
-list(APPEND PATCH_FILES
-    android.patch
-    no-subset.patch
-)
+list(APPEND PATCH_FILES android.patch)
 
 # Get rid of a bunch of `#line` directives that trip ccache 4.9.1.
 # NOTE: this has also the nice effect of "touching" each file, so
@@ -21,8 +18,12 @@ list(APPEND PATCH_CMD COMMAND ${ISED} "/^#line/d"
 list(APPEND CFG_CMD COMMAND
     ${MESON_SETUP} --default-library=$<IF:$<BOOL:${MONOLIBTIC}>,static,shared>
     -Dfreetype=enabled
+    -Dgpu=disabled
+    -Draster=disabled
+    -Dsubset=disabled
     -Dtests=disabled
     -Dutilities=disabled
+    -Dvector=disabled
     ${SOURCE_DIR}
 )
 
@@ -37,6 +38,7 @@ set(DEFINES
     HB_NO_META
     HB_NO_PAINT
     HB_NO_STYLE
+    HB_NO_VAR_COMPOSITES
 )
 
 # We've apparently hit a weird corner-case w/ XText where GCC/STL atomics *sometimes* horribly blow up on an ARM1136JF-S CPU w/ GCC 7.5 & up...
@@ -62,8 +64,8 @@ if(NOT MONOLIBTIC)
 endif()
 
 external_project(
-    DOWNLOAD URL 5de828e8e05c3f69d98c3c34eb6faa5c
-    https://github.com/harfbuzz/harfbuzz/releases/download/11.0.1/harfbuzz-11.0.1.tar.xz
+    DOWNLOAD URL dda477eb1b44ac816ec1a8e4effee1af
+    https://github.com/harfbuzz/harfbuzz/releases/download/14.2.1/harfbuzz-14.2.1.tar.xz
     PATCH_FILES ${PATCH_FILES}
     PATCH_COMMAND ${PATCH_CMD}
     CONFIGURE_COMMAND ${CFG_CMD}

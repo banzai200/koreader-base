@@ -1,6 +1,8 @@
---- i/src/svr-main.c
-+++ w/src/svr-main.c
-@@ -185,7 +185,7 @@ static void main_noinetd(int argc, char ** argv, const char* multipath) {
+diff --git a/src/svr-main.c b/src/svr-main.c
+index a77343cd..f6a5312c 100644
+--- a/src/svr-main.c
++++ b/src/svr-main.c
+@@ -190,7 +190,7 @@ static void main_noinetd(int argc, char ** argv, const char* multipath) {
  			closefds = 1;
  		}
  #endif

@@ -34,6 +34,9 @@ endif()
 
 list(APPEND BUILD_CMD COMMAND make CROSS_TC=${CHOST})
 append_autotools_vars(BUILD_CMD)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    list(APPEND BUILD_CMD DEBUG=1)
+endif()
 
 if(TOOL STREQUAL "fbdepth")
     list(APPEND BUILD_CMD ${FBDEPTH_TARGET})
@@ -56,7 +59,7 @@ else()
 endif()
 
 external_project(
-    DOWNLOAD GIT ab4501820bde0fafc1b2c6d74b9c576a49d2eadd
+    DOWNLOAD GIT 886f25f13368859ad8a899b88d04c26e19cda32e
     https://github.com/NiLuJe/FBInk.git
     BUILD_COMMAND ${BUILD_CMD}
     INSTALL_COMMAND ${INSTALL_CMD}

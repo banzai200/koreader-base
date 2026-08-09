@@ -1,6 +1,8 @@
---- i/src/svr-chansession.c
-+++ w/src/svr-chansession.c
-@@ -678,6 +678,17 @@ static int sessioncommand(struct Channel *channel, struct ChanSess *chansess,
+diff --git a/src/svr-chansession.c b/src/svr-chansession.c
+index a2ea1fcf..fb1a7260 100644
+--- a/src/svr-chansession.c
++++ b/src/svr-chansession.c
+@@ -692,6 +692,17 @@ static int sessioncommand(struct Channel *channel, struct ChanSess *chansess,
  				TRACE(("leave sessioncommand, command too long %d", cmdlen))
  				return DROPBEAR_FAILURE;
  			}
