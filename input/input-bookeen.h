@@ -6,7 +6,9 @@
 
 #include "libue.h"
 
-static void generateFakeEvent(int pipefd[2]) {
+// NOTE: We don't generate any fake events on Bookeen (no USB/charging uevent handling yet),
+//       but input.c still forks this off unconditionally, so it has to exist.
+static void generateFakeEvent(int pipefd[2] __attribute__((unused))) {
   return;
 }
 
