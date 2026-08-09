@@ -788,10 +788,11 @@ local function refresh_cervantes(fb, is_flashing, waveform_mode, x, y, w, h)
 end
 
 
-local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
+local function refresh_bookeen(fb, is_flashing, waveform_mode, x, y, w, h)
     local bb = fb.full_bb or fb.bb
-    w, x = BB.checkBounds(w or bb:getWidth(), x or 0, 0, bb:getWidth(), 0xFFFF)
-    h, y = BB.checkBounds(h or bb:getHeight(), y or 0, 0, bb:getHeight(), 0xFFFF)
+    -- Make sure the rectangle is strictly bounded inside the screen, then rotate it into
+    -- the native rotation the ioctl operates in (c.f., mxc_update).
+    x, y, w, h = bb:getBoundedRect(x, y, w, h, fb.alignment_constraint)
     x, y, w, h = bb:getPhysicalRect(x, y, w, h)
 
     if w <= 1 or h <= 1 then
@@ -807,14 +808,16 @@ local function refresh_bookeen(fb, refreshtype, waveform_mode, x, y, w, h)
     refarea[0].update_region.y_start = y;
     refarea[0].update_region.y_end   = y + h;
 
-    rv = C.ioctl(fb.disp_fd, C.MXCFB_SEND_UPDATE, refarea)
+    local rv = C.ioctl(fb.disp_fd, C.MXCFB_SEND_UPDATE, refarea)
     if rv < 0 then
         local err = ffi.errno()
         fb.debug("MXCFB_SEND_UPDATE ioctl failed:", ffi.string(C.strerror(err)))
         return
     end
 
-    if refreshtype == C.UPDATE_MODE_FULL then
+    -- NOTE: mech_refresh's second argument is a boolean nowadays; it used to be an
+    --        UPDATE_MODE_PARTIAL/FULL enum value back when this port was written.
+    if is_flashing then
         bookeen_mxc_wait_for_update_complete(fb)
     end
 
@@ -1255,6 +1258,9 @@ function framebuffer:init()
         self.mech_refresh = refresh_bookeen
         self.mech_wait_update_complete = bookeen_mxc_wait_for_update_complete
 
+        -- NOTE: refreshA2Imp postdates this port; without this, A2 updates would fall back
+        --       to a full GC16 flash in refresh_bookeen.
+        self.waveform_a2 = C.EINK_A2_MODE
         self.waveform_fast = C.EINK_DU_MODE
         self.waveform_ui = bor(C.EINK_GC16_MODE, C.EINK_LOCAL_MODE)
         self.waveform_flashui = C.EINK_GC16_MODE
@@ -1264,13 +1270,10 @@ function framebuffer:init()
         self.waveform_flashnight = self.waveform_night
         self.night_is_reagl = false
 
-        -- Keep our data structures around, and setup constants
-        self.update_data = ffi.new("struct mxcfb_update_data")
-        -- NOTE: We update temp at runtime on PB
-        self.marker_data = ffi.new("struct mxcfb_update_marker_data")
-        -- NOTE: 0 seems to be a fairly safe assumption for "we don't care about collisions".
-        --       On a slightly related note, the EPDC_FLAG_TEST_COLLISION flag is for dry-run collision tests, never set it.
-        self.marker_data.collision_test = 0
+        -- NOTE: Unlike every other mxcfb target, we do *not* allocate update_data/marker_data here:
+        --       mxcfb_bookeen_h defines neither struct. refresh_bookeen builds its own
+        --       `struct mxcfb_update_data_bookeen`, and the vendor driver has no marker/collision
+        --       mechanism at all (bookeen_mxc_wait_for_update_complete just polls).
     else
         error("unknown device type")
     end

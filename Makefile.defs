@@ -256,14 +256,18 @@ else ifeq ($(TARGET), cervantes)
 	endif
 	USE_LJ_WPACLIENT=1
 else ifeq ($(TARGET), bookeen)
-	CHOST?=arm-pocketbook-linux-gnueabi
 	export BOOKEEN=1
+	# NOTE: no unconditional `CHOST?=` before this test: `?=` would stick and the
+	#       fallback below would never be reachable.
 	HAS_POCKETBOOK_TC:=$(shell command -v arm-pocketbook-linux-gnueabi-gcc 2> /dev/null)
 	ifdef HAS_POCKETBOOK_TC
 		CHOST?=arm-pocketbook-linux-gnueabi
 	else
 		CHOST?=arm-linux-gnueabi
 	endif
+	# The device runs glibc 2.11.1 (c.f., /lib/libc-2.11.1.so in the stock rootfs),
+	# so `make bincheck` has to reject anything needing newer symbols.
+	GLIBC_VERSION_MAX = 2.11
 	USE_LJ_WPACLIENT=1
 else ifndef TARGET
 	# if TARGET is not defined we will build an emulator on current machine
@@ -646,6 +650,19 @@ ifneq (yes,$(firstword $(call hasminstd,$(CXX),c++,__cplusplus,201700)))
 	CXXSTD_FLAGS := -std=gnu++17
 endif
 
+# GCC kept std::filesystem in a *separate* libstdc++fs until it was folded into
+# libstdc++ proper in GCC 9, so anything using it on GCC 7/8 must link -lstdc++fs
+# explicitly. Tesseract 5.5.0 uses it unconditionally (src/ccutil/ccutil.cpp) but
+# only ever sets CMAKE_CXX_STANDARD 17 -- it has no provision for the split, and
+# leaves Libs.private empty in tesseract.pc. libtesseract.a is linked into
+# libk2pdfopt.so.2, which consequently ends up with unresolved _ZNSt10filesystem*
+# symbols (and drags libkoreader-djvu.so down with it, since that NEEDs it).
+# Only relevant to the old-glibc targets: bookeen's TC is GCC 8.3.0.
+needs_stdcxxfs = $(shell printf '%s\n' '$(hashsign)if defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 9' 'yes' '$(hashsign)else' 'no' '$(hashsign)endif' | $1 -x c++ -P -E -)
+ifeq (yes,$(firstword $(call needs_stdcxxfs,$(CXX))))
+	STDCXXFS_LIB := -lstdc++fs
+endif
+
 # Improve reproducibility.
 BASE_CFLAGS += -ffile-prefix-map=$(abspath $(KOR_BASE))/=
 
@@ -842,6 +859,11 @@ set(CMAKE_C_FLAGS_INIT "$(strip $(CFLAGS))")
 $(if $(CCACHE),set(CMAKE_CXX_COMPILER_LAUNCHER $(CCACHE)))
 set(CMAKE_CXX_COMPILER $(REALCXX))
 set(CMAKE_CXX_FLAGS_INIT "$(strip $(CXXFLAGS))")
+# On GCC < 9, std::filesystem lives in its own libstdc++fs; see Makefile.defs.
+# STANDARD_LIBRARIES rather than a linker flag because it is the only knob CMake
+# appends *after* the objects and static archives, which is where an archive has
+# to sit to satisfy them (tesseract's libtesseract.a is the consumer).
+$(if $(STDCXXFS_LIB),set(CMAKE_CXX_STANDARD_LIBRARIES "$(STDCXXFS_LIB)"))
 
 # OBJC language (for SDL2 on macOS).
 $(if $(CCACHE),set(CMAKE_OBJC_COMPILER_LAUNCHER $(CCACHE)))
@@ -975,6 +997,7 @@ set(GLIBC_VERSION_MAX  $(GLIBC_VERSION_MAX))
 # Platform flags.
 set(ANDROID        $(ANDROID))
 set(APPIMAGE       $(APPIMAGE))
+set(BOOKEEN        $(BOOKEEN))
 set(CERVANTES      $(CERVANTES))
 set(DARWIN_AARCH64 $(DARWIN_AARCH64))
 set(KINDLE         $(KINDLE))

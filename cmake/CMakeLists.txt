@@ -408,7 +408,7 @@ declare_project(thirdparty/zlib)
 declare_project(thirdparty/zstd)
 
 # zsync2
-if(CERVANTES OR KINDLE OR KOBO OR POCKETBOOK OR REMARKABLE OR SONY_PRSTUX)
+if(BOOKEEN OR CERVANTES OR KINDLE OR KOBO OR POCKETBOOK OR REMARKABLE OR SONY_PRSTUX)
     set(EXCLUDE_FROM_ALL)
 else()
     set(EXCLUDE_FROM_ALL EXCLUDE_FROM_ALL)
@@ -503,6 +503,14 @@ function(ffi_target NAME OUTPUT INPUT)
     endif()
     add_dependencies(${NAME}-ffi ${OUTPUT})
 endfunction()
+
+# bookeen
+if(BOOKEEN)
+    set(EXCLUDE_FROM_ALL)
+else()
+    set(EXCLUDE_FROM_ALL EXCLUDE_FROM_ALL)
+endif()
+ffi_target(bookeen mxcfb_bookeen_h.lua mxcfb_bookeen_decl.c ${EXCLUDE_FROM_ALL})
 
 # cervantes
 if(CERVANTES)
