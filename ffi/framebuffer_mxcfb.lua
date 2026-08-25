@@ -262,11 +262,11 @@ local function bookeen_mxc_wait_for_update_complete(fb)
     local upd = ffi.new("struct mxcfb_update_data_bookeen[1]")
     upd[0].u0 = 0
     local waited = 0
-    while C.ioctl(fb.disp_fd, C.DISP_EINK_GET_UPDATE_STATUS, upd) ~= 0 do
+    while C.ioctl(fb.disp_fd, C.DISP_CMD_EINK_GET_UPDATE_STATUS, upd) ~= 0 do
         if waited >= BOOKEEN_WAIT_TIMEOUT_US then
             -- Bail out rather than hang. A stale busy flag is survivable: the next
             -- refresh will simply be composited against a slightly stale panel.
-            fb.debug("DISP_EINK_GET_UPDATE_STATUS still busy after",
+            fb.debug("DISP_CMD_EINK_GET_UPDATE_STATUS still busy after",
                      BOOKEEN_WAIT_TIMEOUT_US / 1000, "ms; giving up on this wait")
             return -1
         end
@@ -871,7 +871,7 @@ local function refresh_bookeen(fb, is_flashing, waveform_mode, x, y, w, h)
     refarea[0].update_region.y_start = y;
     refarea[0].update_region.y_end   = y + h;
 
-    local rv = C.ioctl(fb.disp_fd, C.MXCFB_SEND_UPDATE, refarea)
+    local rv = C.ioctl(fb.disp_fd, C.DISP_CMD_EINK_UPDATE, refarea)
     if rv < 0 then
         local err = ffi.errno()
         -- -EAGAIN means eink_dequeueBuffer found no free slot (all NUM_BUFFER_SLOTS == 4
@@ -890,23 +890,21 @@ local function refresh_bookeen(fb, is_flashing, waveform_mode, x, y, w, h)
         -- a slot is freed by eink_FreeBuffer at the end of every eink_refresh_pwr_ctrl
         -- pass, so by the time update_status reads 0 the queue cannot still be full.
         if err == C.EAGAIN then
-            fb.debug("MXCFB_SEND_UPDATE: all 4 driver slots busy, draining then retrying")
+            fb.debug("DISP_CMD_EINK_UPDATE: all 4 driver slots busy, draining then retrying")
             if bookeen_mxc_wait_for_update_complete(fb) == 0 then
-                rv = C.ioctl(fb.disp_fd, C.MXCFB_SEND_UPDATE, refarea)
+                rv = C.ioctl(fb.disp_fd, C.DISP_CMD_EINK_UPDATE, refarea)
             end
             if rv < 0 then
-                fb.debug("MXCFB_SEND_UPDATE retry failed:",
+                fb.debug("DISP_CMD_EINK_UPDATE retry failed:",
                          ffi.string(C.strerror(ffi.errno())), "- dropping this refresh")
                 return
             end
         else
-            fb.debug("MXCFB_SEND_UPDATE ioctl failed:", ffi.string(C.strerror(err)))
+            fb.debug("DISP_CMD_EINK_UPDATE ioctl failed:", ffi.string(C.strerror(err)))
             return
         end
     end
 
-    -- NOTE: mech_refresh's second argument is a boolean nowadays; it used to be an
-    --        UPDATE_MODE_PARTIAL/FULL enum value back when this port was written.
     if is_flashing then
         bookeen_mxc_wait_for_update_complete(fb)
     end
