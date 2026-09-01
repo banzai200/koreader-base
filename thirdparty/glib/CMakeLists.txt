@@ -9,7 +9,7 @@ if(GLIBC_VERSION_MAX AND GLIBC_VERSION_MAX VERSION_LESS "2.6")
     # `pipe2@GLIBC_2.9` or `mkostemp@GLIBC_2.7`.
     list(APPEND PATCH_FILES no_glibc_2.6_or_above_symbols.patch)
 endif()
-if(BOOKEEN)
+if(GLIBC_VERSION_MAX AND GLIBC_VERSION_MAX VERSION_LESS "2.12")
     # Avoid pulling-in `pthread_setname_np@GLIBC_2.12` (device is glibc 2.11.1).
     # Not folded into the check above: those patches strip glibc 2.6+ symbols,
     # far more than a 2.11 target needs.

@@ -39,17 +39,9 @@ struct mxcfb_update_data_bookeen {
 #define	EINK_RECTANGLE_MODE		 0x400
 #define	EINK_A2_IN_MODE			 0x800
 
-// Codes are from the __disp_cmd_t enum in the vendor kernel's
-// include/linux/drv_display_sun4i.h:800-806, which owns these numbers. Keep the kernel's
-// own spelling: nothing on an Allwinner board answers to the mxcfb names (the driver has
-// no notion of them), and nothing shared in ffi/framebuffer_mxcfb.lua needs them either --
-// only one mxcfb_*_h.lua is ever loaded, per device, and the only consumers of these are
-// refresh_bookeen and bookeen_mxc_wait_for_update_complete. These used to be called
-// MXCFB_SEND_UPDATE / MXCFB_SET_WAVEFORM_MODES / MXCFB_SET_TEMPERATURE /
-// DISP_EINK_GET_UPDATE_STATUS -- three conventions for one enum -- which invited reading
-// them as the real mxcfb ioctls they are not. Note in particular that these are *bare*
-// command numbers, not _IOC-encoded like every other port's MXCFB_*: disp_ioctl switches
-// on cmd directly and copies a fixed 8 longs, so there is no size or direction to encode.
+// Codes from vendor kernel's __disp_cmd_t enum (drv_display_sun4i.h).
+// Keep the kernel's spelling; disp_ioctl expects these bare command numbers
+// (not _IOC-encoded). Handler reads a fixed 8-long structure.
 #define DISP_CMD_EINK_INIT			0x400
 #define DISP_CMD_EINK_UNINIT			0x401
 #define DISP_CMD_EINK_UPDATE			0x402

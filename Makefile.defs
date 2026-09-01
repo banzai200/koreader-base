@@ -252,17 +252,8 @@ else ifeq ($(TARGET), cervantes)
 	endif
 	USE_LJ_WPACLIENT=1
 else ifeq ($(TARGET), bookeen)
-	export BOOKEEN=1
-	# NOTE: no unconditional `CHOST?=` before this test: `?=` would stick and the
-	#       fallback below would never be reachable.
-	HAS_POCKETBOOK_TC:=$(shell command -v arm-pocketbook-linux-gnueabi-gcc 2> /dev/null)
-	ifdef HAS_POCKETBOOK_TC
-		CHOST?=arm-pocketbook-linux-gnueabi
-	else
-		CHOST?=arm-linux-gnueabi
-	endif
-	# The device runs glibc 2.11.1 (c.f., /lib/libc-2.11.1.so in the stock rootfs),
-	# so `make bincheck` has to reject anything needing newer symbols.
+	BOOKEEN=1
+	CHOST?=arm-bookeen-linux-gnueabi
 	GLIBC_VERSION_MAX = 2.11
 	USE_LJ_WPACLIENT=1
 else ifndef TARGET
