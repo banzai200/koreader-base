@@ -68,7 +68,7 @@ pid_t  fake_ev_generator_pid = -1;
 #    include "input-sony-prstux.h"
 #elif defined(CERVANTES)
 #    include "input-cervantes.h"
-#elif defined (BOOKEEN)
+#elif defined(BOOKEEN)
 #    include "input-bookeen.h"
 #endif
 
