@@ -599,10 +599,6 @@ else ifeq ($(TARGET), bookeen)
 	#       so, ideally, we shouldn't be using this on those newer devices...
 	COMPAT_CFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
 	COMPAT_CXXFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
-	ifeq ($(shell PATH='$(PATH)' $(CC) -dumpmachine 2>/dev/null), arm-linux-gnueabi)
-		COMPAT_CFLAGS+=$(UBUNTU_COMPAT_CFLAGS)
-		COMPAT_CXXFLAGS+=$(UBUNTU_COMPAT_CFLAGS)
-	endif
 else ifeq ($(TARGET), arm-generic)
 	# Defaults to generic crap
 	TARGET_CFLAGS:=$(ARMV6_GENERIC_ARCH)
