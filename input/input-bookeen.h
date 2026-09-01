@@ -18,6 +18,7 @@
 #ifndef _KO_INPUT_BOOKEEN_H
 #define _KO_INPUT_BOOKEEN_H
 
+#include <errno.h>
 #include <fcntl.h>
 
 #include "libue.h"
@@ -74,6 +75,7 @@ static int readOnlineKnob(const char* path)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd == -1) {
+        fprintf(stderr, "[ko-input]: Failed to open %s: %s\n", path, strerror(errno));
         return -1;
     }
 
@@ -81,6 +83,7 @@ static int readOnlineKnob(const char* path)
     ssize_t len    = read(fd, buf, sizeof(buf) - 1U);
     close(fd);
     if (len <= 0) {
+        fprintf(stderr, "[ko-input]: Failed to read %s: %s\n", path, strerror(errno));
         return -1;
     }
 
@@ -108,7 +111,7 @@ static void generateFakeEvent(int pipefd[2])
     struct uevent_listener listener = { 0 };
     int                    re       = ue_init_listener(&listener);
     if (re < 0) {
-        fprintf(stderr, "[ko-input]: Failed to initialize libue listener (%d)\n", re);
+        fprintf(stderr, "[ko-input]: Failed to initialize libue listener: %s (error code %d)\n", strerror(-re), re);
         return;
     }
 
