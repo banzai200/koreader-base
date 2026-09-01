@@ -2,10 +2,6 @@ list(APPEND PATCH_FILES cmake_tweaks.patch)
 if(LEGACY OR POCKETBOOK)
     list(APPEND PATCH_FILES disable_eventfd.patch)
 endif()
-if(BOOKEEN)
-    # Avoid pulling-in `pthread_setname_np@GLIBC_2.12` (device is glibc 2.11.1).
-    list(APPEND PATCH_FILES no_pthread_setname_np.patch)
-endif()
 
 list(APPEND CMAKE_ARGS
     -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}

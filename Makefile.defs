@@ -252,8 +252,8 @@ else ifeq ($(TARGET), cervantes)
 	endif
 	USE_LJ_WPACLIENT=1
 else ifeq ($(TARGET), bookeen)
-	BOOKEEN=1
 	CHOST?=arm-bookeen-linux-gnueabi
+	BOOKEEN=1
 	GLIBC_VERSION_MAX = 2.11
 	USE_LJ_WPACLIENT=1
 else ifndef TARGET
@@ -591,14 +591,12 @@ else ifeq ($(TARGET), cervantes)
 		COMPAT_CXXFLAGS:=$(UBUNTU_COMPAT_CFLAGS)
 	endif
 else ifeq ($(TARGET), bookeen)
-	# NOTE: The TC itself is built in ARM mode (otherwise glibc 2.9 fails to build).
-	#       We prefer Thumb mode for our own binaries, though, much like on every other i.MX device ;).
-	ARM_ARCH:=$(ARMV7_A8_ARCH)
-	ARM_ARCH+=-mfloat-abi=softfp
-	# NOTE: Because of course everything is terrible, newer FW (5.19+) use GCC 6.3.0's libstdc++,
-	#       so, ideally, we shouldn't be using this on those newer devices...
-	COMPAT_CFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
-	COMPAT_CXXFLAGS:=$(STLABI_COMPAT_CFLAGS) $(PB_COMPAT_CFLAGS)
+	TARGET_CFLAGS:=$(ARMV7_A8_ARCH)
+	TARGET_CFLAGS+=-mfloat-abi=softfp
+	# The device is glibc 2.11, i.e. predates _DEFAULT_SOURCE: nothing enables
+	# __USE_XOPEN_EXTENDED by default, so e.g. getpgid (willuslib/wsys.c) isn't
+	# even declared. No CXX counterpart: g++ already defines _GNU_SOURCE itself.
+	COMPAT_CFLAGS:=-D_GNU_SOURCE
 else ifeq ($(TARGET), arm-generic)
 	# Defaults to generic crap
 	TARGET_CFLAGS:=$(ARMV6_GENERIC_ARCH)
@@ -644,19 +642,6 @@ ifneq (yes,$(firstword $(call hasminstd,$(CC),c,__STDC_VERSION__,201100)))
 endif
 ifneq (yes,$(firstword $(call hasminstd,$(CXX),c++,__cplusplus,201700)))
 	CXXSTD_FLAGS := -std=gnu++17
-endif
-
-# GCC kept std::filesystem in a *separate* libstdc++fs until it was folded into
-# libstdc++ proper in GCC 9, so anything using it on GCC 7/8 must link -lstdc++fs
-# explicitly. Tesseract 5.5.0 uses it unconditionally (src/ccutil/ccutil.cpp) but
-# only ever sets CMAKE_CXX_STANDARD 17 -- it has no provision for the split, and
-# leaves Libs.private empty in tesseract.pc. libtesseract.a is linked into
-# libk2pdfopt.so.2, which consequently ends up with unresolved _ZNSt10filesystem*
-# symbols (and drags libkoreader-djvu.so down with it, since that NEEDs it).
-# Only relevant to the old-glibc targets: bookeen's TC is GCC 8.3.0.
-needs_stdcxxfs = $(shell printf '%s\n' '$(hashsign)if defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 9' 'yes' '$(hashsign)else' 'no' '$(hashsign)endif' | $1 -x c++ -P -E -)
-ifeq (yes,$(firstword $(call needs_stdcxxfs,$(CXX))))
-	STDCXXFS_LIB := -lstdc++fs
 endif
 
 # Improve reproducibility.
@@ -881,11 +866,6 @@ set(CMAKE_C_FLAGS_INIT "$(strip $(CFLAGS))")
 $(if $(CCACHE),set(CMAKE_CXX_COMPILER_LAUNCHER $(CCACHE)))
 set(CMAKE_CXX_COMPILER $(REALCXX))
 set(CMAKE_CXX_FLAGS_INIT "$(strip $(CXXFLAGS))")
-# On GCC < 9, std::filesystem lives in its own libstdc++fs; see Makefile.defs.
-# STANDARD_LIBRARIES rather than a linker flag because it is the only knob CMake
-# appends *after* the objects and static archives, which is where an archive has
-# to sit to satisfy them (tesseract's libtesseract.a is the consumer).
-$(if $(STDCXXFS_LIB),set(CMAKE_CXX_STANDARD_LIBRARIES "$(STDCXXFS_LIB)"))
 
 # OBJC language (for SDL3 on macOS).
 $(if $(CCACHE),set(CMAKE_OBJC_COMPILER_LAUNCHER $(CCACHE)))
