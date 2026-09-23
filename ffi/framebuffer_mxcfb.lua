@@ -254,7 +254,7 @@ local function bookeen_mxc_wait_for_update_complete(fb)
     local upd = ffi.new("struct mxcfb_update_data_bookeen[1]")
     upd[0].u0 = 0
     local waited = 0
-    while C.ioctl(fb.disp_fd, C.DISP_CMD_EINK_GET_UPDATE_STATUS, upd) ~= 0 do
+    while C.ioctl(fb.disp_fd, C.DISP_CMD_EINK_GET_UPDATE_STATUS, upd) > 0 do
         if waited >= BOOKEEN_WAIT_TIMEOUT_US then
             -- Bail out rather than hang. A stale busy flag is survivable: the next
             -- refresh will simply be composited against a slightly stale panel.

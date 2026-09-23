@@ -586,10 +586,6 @@ else ifeq ($(TARGET), cervantes)
 else ifeq ($(TARGET), bookeen)
 	TARGET_CFLAGS:=$(ARMV7_A8_ARCH)
 	TARGET_CFLAGS+=-mfloat-abi=softfp
-	# The device is glibc 2.11, i.e. predates _DEFAULT_SOURCE: nothing enables
-	# __USE_XOPEN_EXTENDED by default, so e.g. getpgid (willuslib/wsys.c) isn't
-	# even declared. No CXX counterpart: g++ already defines _GNU_SOURCE itself.
-	COMPAT_CFLAGS:=-D_GNU_SOURCE
 else ifeq ($(TARGET), arm-generic)
 	# Defaults to generic crap
 	TARGET_CFLAGS:=$(ARMV6_GENERIC_ARCH)

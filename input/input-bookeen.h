@@ -23,54 +23,24 @@
 
 #include "libue.h"
 
-// NOTE: This deliberately does *not* define USBPLUG_DEVPATH / USBHOST_DEVPATH the way the
-//       kobo and cervantes headers do. Those name `/devices/platform/usb_plug` and
-//       `/devices/platform/usb_host`, which are NTX board glue: no such platform devices
-//       exist in this Allwinner A13 vendor kernel. The only USB platform devices here are
-//       `sw_usb_udc` and `sw_hcd_host0`, and they are registered once at init from
-//       drivers/usb/sun5i_usb/manager/usbc0_platform.c:129 -- not on plug/unplug. Copying
-//       those defines over is exactly why this file stayed a stub; matching on them would
-//       compile fine and never fire.
-//
-//       What we do get is the AXP20 PMIC. On a charger IRQ (AXP20_IRQ_ACIN / USBIN / ACRE /
-//       USBRE / CHAOV / ...), axp_battery_event() calls axp_change()
-//       (drivers/power/axp_power/axp20-sply-cou.c:601), which refreshes usb_valid/ac_valid
-//       from the chip and then calls power_supply_changed(&charger->batt) -- that lands as a
-//       KOBJ_CHANGE uevent on the `power_supply` class (drivers/power/power_supply_core.c:60).
-//       The sysfs_notify() on usb/online immediately after it emits *no* uevent, so the
-//       battery device's CHANGE event is the only edge visible from userspace.
-//
-//       Two consequences shape the code below:
-//
-//       1. The uevent carries POWER_SUPPLY_NAME= and every property
-//          (drivers/power/power_supply_sysfs.c:242), but libue's `struct uevent` only ever
-//          exposes ACTION/DEVPATH/SUBSYSTEM/MODALIAS/DEVNAME -- so that payload is
-//          unreachable, and we have to read sysfs to learn what actually changed.
-//       2. The same battery CHANGE event also fires on every battery-percentage change
-//          (axp20-sply-cou.c:1827, on the charger's polling work), so it is *not* a charge
-//          edge by itself. Hence the explicit edge detection below; without it KOReader
-//          would broadcast a Charging event every time the gauge moved.
-//
-//       There is no data-aware-host signal anywhere in this SoC's USB stack -- the gadget
-//       never surfaces enumeration to userspace -- so Charging/NotCharging is all we can
-//       honestly report, and CODE_FAKE_USB_PLUGGED_{IN_TO,OUT_OF}_HOST is left unused. That
-//       is fine here: canToggleMassStorage is `no` on bookeen, and the frontend deliberately
-//       wires UsbPlugIn/UsbPlugOut to the same handlers as Charging/NotCharging
-//       (c.f. Bookeen:setEventHandlers).
+// Bookeen's AXP20 power driver emits power_supply uevents for charger changes, but the
+// uevent payload is not exposed by libue. Read the online state from sysfs instead.
+// Battery polling uses the same CHANGE event, so report only actual charge-state edges.
+// The A13 USB stack exposes no host/data connection event; charging state is the only
+// reliable signal available to the Bookeen frontend.
 #define POWER_SUPPLY_SUBSYSTEM "power_supply"
-// `usb` is registered unconditionally, `ac` only when AXP20_CHARGE_STATUS bit 1 is clear
-// (axp20-sply-cou.c:2007-2014), so the latter may legitimately not exist. Tolerate that.
+// The AC supply may be absent on some Bookeen firmware variants.
 #define USB_ONLINE_SYSFS "/sys/class/power_supply/usb/online"
 #define AC_ONLINE_SYSFS  "/sys/class/power_supply/ac/online"
 
 static void sendEvent(int fd, struct input_event* ev)
 {
     if (write(fd, ev, sizeof(struct input_event)) == -1) {
-        fprintf(stderr, "[ko-input]: Failed to generate fake event.\n");
+        fprintf(stderr, "[ko-input]: Failed to generate fake event: %s\n", strerror(errno));
     }
 }
 
-// Returns 1 (online), 0 (offline), or -1 if the knob doesn't exist / can't be read.
+// Return 1 for online, 0 for offline, or -1 when the node cannot be read.
 static int readOnlineKnob(const char* path)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -87,11 +57,11 @@ static int readOnlineKnob(const char* path)
         return -1;
     }
 
-    // sysfs renders these as "%d\n", so the first byte is the digit.
+    // Bookeen sysfs renders the value as a decimal digit followed by a newline.
     return buf[0] == '0' ? 0 : 1;
 }
 
-// 1 if we're on external power, 0 if not, -1 if we cannot tell at all.
+// Return the combined USB/AC charging state.
 static int isPluggedIn(void)
 {
     int usb = readOnlineKnob(USB_ONLINE_SYSFS);
@@ -115,9 +85,7 @@ static void generateFakeEvent(int pipefd[2])
         return;
     }
 
-    // Seed the edge detector with the state we started in. If neither knob is readable there
-    // is nothing this process can ever usefully report, so say so once and stop rather than
-    // spin on uevents we cannot interpret.
+    // Seed edge detection with the state at startup.
     int last_state = isPluggedIn();
     if (last_state == -1) {
         fprintf(stderr, "[ko-input]: No readable power_supply online knob, charge events disabled.\n");
@@ -125,8 +93,7 @@ static void generateFakeEvent(int pipefd[2])
         return;
     }
 
-    // NOTE: We leave the timestamp at zero, like the other platforms: we don't know the
-    //       system's evdev clock source here, and zero is fine for EV_KEY.
+    // EV_KEY events do not require a timestamp on Bookeen.
     struct input_event ev = { 0 };
     ev.type               = EV_KEY;
     ev.value              = 1;
@@ -136,15 +103,14 @@ static void generateFakeEvent(int pipefd[2])
         if (!uev.subsystem || !UE_STR_EQ(uev.subsystem, POWER_SUPPLY_SUBSYSTEM)) {
             continue;
         }
-        // power_supply_changed() only ever emits CHANGE; ADD is the class device showing up,
-        // which is worth a re-read too (it means a supply we couldn't see before now exists).
+        // ADD can make a previously unavailable supply visible.
         if (uev.action != UEVENT_ACTION_CHANGE && uev.action != UEVENT_ACTION_ADD) {
             continue;
         }
 
         int state = isPluggedIn();
         if (state == -1 || state == last_state) {
-            // Almost always the battery-percentage notification. Ignore it.
+            // Ignore battery polling and unreadable states.
             continue;
         }
         last_state = state;
