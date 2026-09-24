@@ -602,18 +602,13 @@ function(ffi_target NAME OUTPUT INPUT)
     get_filename_component(TGT ${OUTPUT} NAME)
     set(FFI_CDECL_FLAGS
         -c ${CMAKE_C_COMPILER}
-        -f -std=gnu11,-nostdinc
+        -f -std=gnu11
         -p --env-only
         -I ${STAGING_DIR}/include
     )
     if(APPLE)
         # See note in Makefile.defs.
         list(APPEND FFI_CDECL_FLAGS -f -idirafter,/usr/local/include)
-    else()
-        # On non-macOS, don't use any system includes from the build host.
-        # This ensures FFI generation is consistent across platforms: we only use
-        # headers from STAGING_DIR (the target's sysroot), not host system headers.
-        list(APPEND FFI_CDECL_FLAGS -f -isysroot,${STAGING_DIR})
     endif()
     add_custom_target(
         ${TGT}
