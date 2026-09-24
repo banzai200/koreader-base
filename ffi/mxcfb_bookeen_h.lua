@@ -1,40 +1,34 @@
-local ffi = require("ffi")
+-- Automatically generated with ffi-cdecl.
 
-ffi.cdef[[
-static const int UPDATE_MODE_PARTIAL = 0;
-static const int UPDATE_MODE_FULL = 1;
-
-static const int EINK_DU_MODE = 0x02;
-static const int EINK_GC16_MODE = 0x04;
-static const int EINK_GC4_MODE = 0x08;
-static const int EINK_A2_MODE = 0x10;
-static const int EINK_SHORT_GC16_LOCAL_MODE = 0x20;
-static const int EINK_SHORT_DU_MODE = 0x40;
-static const int EINK_LOCAL_MODE = 0x80;
-static const int EINK_A2_OUT_MODE = 0x100;
-static const int EINK_DITHERING_MODE = 0x200;
-static const int EINK_RECTANGLE_MODE = 0x400;
-static const int EINK_A2_IN_MODE = 0x800;
-
+require("ffi").cdef[[
 struct bookeen_region_t {
-  unsigned int x_start;
-  unsigned int x_end;
-  unsigned int y_start;
-  unsigned int y_end;
+  __u32 x_start;
+  __u32 x_end;
+  __u32 y_start;
+  __u32 y_end;
 };
-
 struct mxcfb_update_data_bookeen {
-  unsigned int u0;
-  unsigned int u1;
-  unsigned int u2;
-  unsigned int u3;
+  __u32 u0;
+  __u32 u1;
+  __u32 u2;
+  __u32 u3;
   struct bookeen_region_t update_region;
 };
-
-static const int DISP_CMD_EINK_UPDATE = 0x402;
-static const int DISP_CMD_EINK_SET_MODE = 0x403;
-static const int DISP_CMD_EINK_SET_TEMPERATURE = 0x404;
-static const int DISP_CMD_EINK_GET_UPDATE_STATUS = 0x405;
-
+static const unsigned UPDATE_MODE_PARTIAL = 0;
+static const unsigned UPDATE_MODE_FULL = 1;
+static const unsigned EINK_DU_MODE = 2;
+static const unsigned EINK_GC16_MODE = 4;
+static const unsigned EINK_GC4_MODE = 8;
+static const unsigned EINK_A2_MODE = 16;
+static const unsigned EINK_SHORT_GC16_LOCAL_MODE = 32;
+static const unsigned EINK_SHORT_DU_MODE = 64;
+static const unsigned EINK_LOCAL_MODE = 128;
+static const unsigned EINK_A2_OUT_MODE = 256;
+static const unsigned EINK_DITHERING_MODE = 512;
+static const unsigned EINK_RECTANGLE_MODE = 1024;
+static const unsigned EINK_A2_IN_MODE = 2048;
+static const unsigned DISP_CMD_EINK_UPDATE = 1026;
+static const unsigned DISP_CMD_EINK_SET_MODE = 1027;
+static const unsigned DISP_CMD_EINK_SET_TEMPERATURE = 1028;
+static const unsigned DISP_CMD_EINK_GET_UPDATE_STATUS = 1029;
 ]]
-
