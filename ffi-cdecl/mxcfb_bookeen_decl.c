@@ -1,7 +1,6 @@
 #include <linux/fb.h>
 #include <linux/ioctl.h>
 #include "include/mxcfb-bookeen.h"
-#include "ffi-cdecl.h"
 
 cdecl_struct(bookeen_region_t)
 cdecl_struct(mxcfb_update_data_bookeen)
